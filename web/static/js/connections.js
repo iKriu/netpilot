@@ -44,8 +44,10 @@ export async function pageConnections() {
       h('span', { class: 'grow' }, h('span', { class: 'name ell', style: 'display:block', title: c.host || c.destination }, c.host || c.destination || '—'),
         h('span', { class: 'meta' }, (c.network || '').toUpperCase() + ' · ' + duration(c.start))),
       h('span', { class: 'col m-full', style: 'width:250px' }, routeOf(c), h('div', { class: 'meta ell', title: c.rule }, c.rule ? 'правило: ' + c.rule : 'нет правила')),
-      h('span', { class: 'col mono hide-m', style: 'width:110px' }, '↓ ' + bytes(c.down), h('br'), h('span', { style: 'color:var(--mut)' }, '↑ ' + bytes(c.up))),
-      h('span', { class: 'col', style: 'display:flex;gap:2px' },
+      h('span', { class: 'col mono hide-m num', style: 'width:110px' }, '↓ ' + bytes(c.down), h('br'), h('span', { style: 'color:var(--mut)' }, '↑ ' + bytes(c.up))),
+      // Ширина постоянная: у строк без сайта одна кнопка, а не две, и колонка
+      // трафика иначе съезжала бы от строки к строке.
+      h('span', { class: 'col acts', style: 'width:76px' },
         c.host && (isDirect(c)
           ? h('button', { class: 'ib b', style: 'color:var(--acc)', 'aria-label': 'Всегда через прокси', title: `Всегда через прокси: ${c.host}`, onclick: async () => { await quickRule(c.host.replace(/:\d+$/, ''), 'proxy'); } }, icon('servers', 's'))
           : h('button', { class: 'ib', 'aria-label': 'Всегда напрямую', title: `Всегда напрямую: ${c.host}`, onclick: async () => { await quickRule(c.host.replace(/:\d+$/, ''), 'direct'); } }, icon('arrow', 's'))),
@@ -54,11 +56,11 @@ export async function pageConnections() {
     const search = h('input', { type: 'search', placeholder: 'Сайт, адрес или правило', value: cs.query, 'aria-label': 'Поиск соединения',
       oninput: e => { cs.query = e.target.value; draw(); const el = root.querySelector('input[type=search]'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } } });
     const outPanel = arr(data.outbounds).length > 0 && card('Трафик по серверам', null, h('div', { class: 'list' }, data.outbounds.map(o => h('div', { class: 'row' },
-      h('span', { class: 'grow name' }, o.name), h('span', { class: 'col mono', style: 'width:150px' }, '↓ ' + mbps(o.downRate) + ' МБ/с'),
-      h('span', { class: 'col mono hide-m', style: 'width:150px;color:var(--mut)' }, 'за сеанс ' + bytes(o.down))))));
+      h('span', { class: 'grow name' }, o.name), h('span', { class: 'col mono num', style: 'width:150px' }, '↓ ' + mbps(o.downRate) + ' МБ/с'),
+      h('span', { class: 'col mono hide-m num', style: 'width:150px;color:var(--mut)' }, 'за сеанс ' + bytes(o.down))))));
 
     fill(root, head, kpis,
-      h('section', { class: 'card', style: 'overflow:hidden' },
+      h('section', { class: 'card tbl', style: 'overflow:hidden' },
         h('div', { class: 'ch', style: 'gap:10px' },
           h('label', { class: 'search', style: 'flex:1 1 220px;width:auto;border-color:var(--line)' }, icon('search', 's'), search),
           select([['', `Все устройства · ${sources.length}`], ...sources.map(ip => [ip, `${srcName(ip)} — ${ip}`])], cs.device, v => { cs.device = v; draw(); }, { style: 'width:auto;min-width:200px' }),

@@ -316,7 +316,7 @@ function showAuth(mode, needCode) {
       withCode && h('label', { class: 'fld' }, h('span', { class: 'lbl' }, 'Код первой настройки'), code,
         h('span', { class: 'hint' }, 'Код напечатан в журнале программы')),
       err, btn,
-      !setup && h('div', { class: 'hint', style: 'text-align:center' }, 'Забыли пароль — задайте новый на устройстве: ', h('span', { class: 'mono', style: 'color:var(--ink)' }, 'netpilot -password')))));
+      !setup && h('div', { class: 'hint', style: 'text-align:center' }, 'Забыли пароль — удалите файл ', h('span', { class: 'mono', style: 'color:var(--ink)' }, 'auth.json'), ' в папке данных NetPilot и перезапустите его: появится код первой настройки'))));
   document.body.append(scr);
   pw.focus();
 }

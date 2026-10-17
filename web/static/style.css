@@ -87,6 +87,10 @@ body.side-collapsed .sidefoot { flex-direction: column; padding-left: 0; padding
 .search { display: flex; align-items: center; gap: 10px; height: 40px; width: 360px; padding: 0 12px; border-radius: 10px; background: var(--bg); color: var(--mut); border: 1px solid transparent; text-align: left; }
 .search:hover { border-color: var(--line); }
 .search input { border: 0; outline: 0; background: transparent; flex-grow: 1; min-width: 0; }
+/* Подсказка в поиске наверху — в одну строку: при узком окне она переносилась
+   и раздувала шапку, а «Ctrl K» разваливалось на две строки. */
+.top .search .grow { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.top .search .kbd { white-space: nowrap; flex-shrink: 0; }
 .kbd { font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 2px 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--mut); }
 .state { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px; border-radius: 99px; background: var(--oks); color: var(--ok); font-weight: 600; font-size: 13px; white-space: nowrap; border: 0; }
 .state.off { background: #F2F4F7; color: var(--ink2); }
@@ -133,6 +137,27 @@ a.card:hover { border-color: var(--accl); color: var(--ink); }
 .list a.row:hover, .list .row.click:hover { background: #FAFBFD; cursor: pointer; }
 .thead { display: flex; align-items: center; gap: 14px; padding: 10px 20px; background: #FAFBFC; border-bottom: 1px solid var(--line2); font-size: 11.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--mut); }
 .col { flex-shrink: 0; }
+/* Числа, которые меняются каждые 2 секунды: одна ширина цифр и без переноса. */
+.num { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.col.acts { display: flex; gap: 2px; justify-content: flex-end; }
+/* Таблица со столбцами фиксированной ширины. Когда карточка уже, чем сумма
+   столбцов (окно средней ширины с боковым меню), столбец «Сайт» схлопывался
+   в пару букв, а заголовки налезали друг на друга. Решаем по ширине самой
+   карточки, а не окна: строка переносится, как на телефоне. */
+.tbl { container-type: inline-size; }
+@container (max-width: 820px) {
+  .tbl .thead { display: none; }
+  .tbl .list .row { flex-wrap: wrap; row-gap: 6px; }
+  .tbl .list .row > .col { width: auto !important; }
+  .tbl .list .row > .grow { flex: 1 1 180px; }
+  .tbl .list .row .m-full { flex-basis: 100%; }
+  .tbl .list .row > .acts { margin-left: auto; }
+}
+/* Список, прокручиваемый внутри окна: сжимается по высоте вместо того, чтобы обрезать строки. */
+.list.scroll { overflow-y: auto; overscroll-behavior: contain; min-height: 140px; flex: 0 1 auto; }
+.list.scroll { scrollbar-width: thin; }
+.list.scroll::-webkit-scrollbar { display: block; width: 6px; }
+.list.scroll::-webkit-scrollbar-thumb { background: #D0D5DD; border-radius: 99px; }
 .ico { width: 38px; height: 38px; border-radius: 11px; background: #F2F4F7; color: var(--ink2); display: flex; align-items: center; justify-content: center; flex-shrink: 0; position: relative; }
 .ico.big { width: 52px; height: 52px; border-radius: 14px; }
 .ico .on { position: absolute; right: -2px; bottom: -2px; width: 11px; height: 11px; border-radius: 50%; background: var(--okd); border: 2px solid var(--card); }
@@ -256,6 +281,9 @@ textarea.inp { height: auto; min-height: 84px; padding: 10px 12px; resize: verti
 .mh { display: flex; align-items: center; gap: 12px; padding: 18px 20px 18px 24px; border-bottom: 1px solid var(--line2); }
 .mt { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -0.01em; flex-grow: 1; }
 .mb { padding: 20px 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
+/* Блоки окна не сжимаются, а прокручиваются вместе с ним: иначе блок с overflow:hidden
+   ужимался до высоты окна и молча обрезал содержимое. */
+.mb > * { flex-shrink: 0; }
 .mf { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 14px 24px; border-top: 1px solid var(--line2); background: #FAFBFC; flex-wrap: wrap; }
 .modal-bg.drawer-bg { justify-content: flex-end; padding: 0; }
 .drawer { width: 520px; max-width: 100%; height: 100%; background: var(--card); box-shadow: -24px 0 48px -16px rgba(12, 17, 27, 0.3); display: flex; flex-direction: column; animation: drawer-in 0.28s cubic-bezier(0.21, 1.02, 0.73, 1) both; }
@@ -370,7 +398,10 @@ textarea.inp { height: auto; min-height: 84px; padding: 10px 12px; resize: verti
   .btn.sm { height: 36px; }
   .ib { width: 44px; height: 44px; }
   .opt { height: 40px; }
-  .seg button { height: 40px; }
+  /* Длинные подписи («Блокировать интернет») не влезали в экран телефона и
+     обрезались справа: кнопки делят ширину поровну, подпись переносится. */
+  .seg { display: flex; width: 100%; }
+  .seg button { height: auto; min-height: 40px; padding: 6px 10px; flex: 1 1 0; min-width: 0; white-space: normal; line-height: 1.25; }
   .inp, .sel { height: 48px; font-size: 16px; }
   .sel.sm { height: 44px; }
   .tabs { display: grid; position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; height: calc(64px + env(safe-area-inset-bottom)); padding-bottom: env(safe-area-inset-bottom); grid-template-columns: repeat(5, minmax(0, 1fr)); background: rgba(255, 255, 255, 0.96); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); border-top: 1px solid var(--line); }
