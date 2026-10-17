@@ -39,7 +39,7 @@ func ListenDHCP(ctx context.Context, allowed func() bool) {
 func openDHCP() (net.PacketConn, error) { return net.ListenPacket("udp4", "0.0.0.0:67") }
 
 var (
-	dhcpRunning   atomic.Bool              // цикл слушателя запущен
+	dhcpRunning   atomic.Int32             // сколько циклов слушателя запущено
 	dhcpHoldUntil atomic.Int64             // до какого момента (unix ns) порт не открывать
 	dhcpRelease   = make(chan chan struct{}) // просьба закрыть сокет сейчас
 )
@@ -49,7 +49,7 @@ var (
 // включают на ходу, а проверка allowed() ещё не успела сработать.
 func ReleaseDHCPPort(hold time.Duration) {
 	dhcpHoldUntil.Store(time.Now().Add(hold).UnixNano())
-	if !dhcpRunning.Load() {
+	if dhcpRunning.Load() == 0 {
 		return
 	}
 	ack := make(chan struct{})
@@ -62,8 +62,8 @@ func ReleaseDHCPPort(hold time.Duration) {
 
 // runDHCPListener — цикл управления сокетом; open подменяется в тестах.
 func runDHCPListener(ctx context.Context, allowed func() bool, open func() (net.PacketConn, error), every time.Duration) {
-	dhcpRunning.Store(true)
-	defer dhcpRunning.Store(false)
+	dhcpRunning.Add(1)
+	defer dhcpRunning.Add(-1)
 	var (
 		pc   net.PacketConn
 		done chan struct{}

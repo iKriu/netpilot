@@ -85,6 +85,32 @@ func (r PlanRule) SplitDomainIP() (domain, ip *PlanRule) {
 	return
 }
 
+// IP-списки (Re:filter и т.п.) действуют только на веб-трафик: распознанный
+// по содержимому (WebProtocols) или идущий на стандартные порты (WebPorts).
+// Причина — в singbox.listsForWeb: иначе через прокси уходили пиры торрентов.
+var (
+	WebProtocols = []string{"tls", "http", "quic"}
+	WebPorts     = []int{80, 443, 853, 8080, 8443}
+)
+
+// SplitIPLists выделяет из IP-части правила IP-списки, ограниченные веб-портами
+// (для ядер, которые не умеют проверять протокол, — mihomo). rest — остальные
+// IP-условия (nil, если их нет), lists — списки (nil, если ограничивать нечего).
+func (r PlanRule) SplitIPLists() (rest, lists *PlanRule) {
+	if len(r.IPLists) == 0 || len(r.Ports)+len(r.PortRanges)+len(r.Protocols) > 0 {
+		return &r, nil
+	}
+	if len(r.Geoip)+len(r.CIDRs) > 0 {
+		x := r
+		x.IPLists = nil
+		rest = &x
+	}
+	l := r
+	l.Geoip, l.CIDRs = nil, nil
+	l.Ports = slices.Clone(WebPorts)
+	return rest, &l
+}
+
 func NodeTag(id string) string { return "node-" + id }
 
 // Автоматические группы: как часто проверять серверы и насколько текущий

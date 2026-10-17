@@ -235,3 +235,59 @@ func TestRenderDeviceIPv6AndSecret(t *testing.T) {
 		t.Fatalf("источники маршрута и правила: %v, ожидалось %s дважды\n%s", withSrc, want, data)
 	}
 }
+
+// IP-списки (Re:filter) ведут через прокси только веб-трафик: иначе пиры
+// торрентов из подсетей хостингов уходили через прокси, а зашифрованное
+// рукопожатие BitTorrent правило «торренты напрямую» не распознаёт.
+func TestListsOnlyForWeb(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "refilter-ips.srs"), []byte("SRS\x01"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := model.Defaults()
+	cfg.Rules = []model.Rule{
+		{ID: "t", Enabled: true, What: model.What{Protocols: []string{"bittorrent"}}, Where: model.Where{Action: "direct"}},
+		{ID: "l", Enabled: true, What: model.What{Lists: []string{"refilter-ips"}, IPs: []string{"203.0.113.0/24"}}, Where: model.Where{Action: "proxy"}},
+		{ID: "p", Enabled: true, What: model.What{Lists: []string{"refilter-ips"}, Ports: []string{"6881"}}, Where: model.Where{Action: "block"}},
+	}
+	data, err := Render(cfg, core.Env{DataDir: dir, OS: "linux", ListsDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p struct {
+		Route struct {
+			Rules []map[string]any `json:"rules"`
+		} `json:"route"`
+	}
+	if err := json.Unmarshal(data, &p); err != nil {
+		t.Fatal(err)
+	}
+	var byProto, byPort, cidr, userPort bool
+	for _, r := range p.Route.Rules {
+		sets, _ := r["rule_set"].([]any)
+		hasList := len(sets) == 1 && sets[0] == "listip-refilter-ips"
+		_, proto := r["protocol"]
+		_, port := r["port"]
+		switch {
+		case hasList && r["action"] == "reject":
+			userPort = port && !proto // явный порт человека — без веб-ограничения
+		case hasList && proto && !port:
+			byProto = true
+		case hasList && port && !proto:
+			byPort = true
+		case hasList:
+			t.Errorf("IP-список без ограничения веб-трафиком: %v", r)
+		case r["ip_cidr"] != nil && r["outbound"] == "proxy":
+			cidr = !proto && !port // явные адреса — как раньше, без ограничения
+		}
+	}
+	if !byProto || !byPort || !cidr || !userPort {
+		t.Errorf("протокол=%v порты=%v cidr=%v порт-человека=%v\n%s", byProto, byPort, cidr, userPort, data)
+	}
+	// sing-box должен принимать такие поля в правилах.
+	ctx, cancel := context.WithCancel(include.Context(context.Background()))
+	defer cancel()
+	if _, err := sjson.UnmarshalExtendedContext[option.Options](ctx, data); err != nil {
+		t.Fatalf("sing-box не разобрал конфиг: %v", err)
+	}
+}

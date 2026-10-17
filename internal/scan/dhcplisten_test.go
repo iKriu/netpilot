@@ -125,6 +125,8 @@ func TestDHCPListenerRetriesOpen(t *testing.T) {
 // ReleaseDHCPPort закрывает сокет сразу (не ждёт следующей проверки allowed)
 // и не даёт открыть его заново, пока длится удержание.
 func TestReleaseDHCPPort(t *testing.T) {
+	// Слушатели прошлых тестов ещё могут доживать и забрать сигнал себе.
+	waitFor(t, "прежние слушатели остановились", func() bool { return dhcpRunning.Load() == 0 })
 	f := &fakeOpener{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
