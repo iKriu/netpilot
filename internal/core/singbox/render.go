@@ -126,7 +126,7 @@ func render(cfg *model.Config, env core.Env, external bool) ([]byte, error) {
 				rules = append(rules, M{"action": "resolve", "server": dnsDirect})
 				resolved = true
 			}
-			rules = append(rules, ipPart)
+			rules = append(rules, listsForWeb(ipPart)...)
 		}
 		if domainPart == nil && ipPart == nil {
 			rules = append(rules, sr)
@@ -521,6 +521,48 @@ func splitByMatch(rule M) (domainPart, ipPart M) {
 		setIf(ipPart, "rule_set", ipSets)
 	}
 	return domainPart, ipPart
+}
+
+// listsForWeb ограничивает IP-списки (Re:filter и т.п.) веб-трафиком. Это
+// тысячи подсетей: в них целиком попадают хостинги, где живут сидбоксы и пиры
+// торрентов. Зашифрованное рукопожатие BitTorrent ядро не распознаёт, правило
+// «торренты напрямую» его пропускает, и пиры из этих подсетей уходили через
+// прокси — а провайдеры прокси P2P режут. Заблокированные сайты и сервисы —
+// это TLS, HTTP и QUIC или стандартные веб-порты, их список по-прежнему ведёт
+// через прокси; остальной трафик на те же адреса идёт по следующим правилам.
+// Если в правиле явно заданы порты или протокол — решает человек, не трогаем.
+func listsForWeb(ipPart M) []M {
+	sets, _ := ipPart["rule_set"].([]string)
+	var lists, other []string
+	for _, s := range sets {
+		if strings.HasPrefix(s, "listip-") {
+			lists = append(lists, s)
+		} else {
+			other = append(other, s)
+		}
+	}
+	_, hasPort := ipPart["port"]
+	_, hasRange := ipPart["port_range"]
+	_, hasProto := ipPart["protocol"]
+	if len(lists) == 0 || hasPort || hasRange || hasProto {
+		return []M{ipPart}
+	}
+	var out []M
+	if len(other) > 0 || hasAny(ipPart, ipKeys) {
+		rest := maps.Clone(ipPart)
+		delete(rest, "rule_set")
+		setIf(rest, "rule_set", other)
+		out = append(out, rest)
+	}
+	byProto := maps.Clone(ipPart)
+	for _, k := range ipKeys {
+		delete(byProto, k)
+	}
+	byProto["rule_set"] = lists
+	byPort := maps.Clone(byProto)
+	byProto["protocol"] = core.WebProtocols
+	byPort["port"] = core.WebPorts
+	return append(out, byProto, byPort)
 }
 
 func hasAny(m M, keys []string) bool {

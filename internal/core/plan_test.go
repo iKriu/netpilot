@@ -58,3 +58,19 @@ func TestClashRequest(t *testing.T) {
 		t.Fatalf("запрос: %s, заголовок %q", req.URL, req.Header.Get("Authorization"))
 	}
 }
+
+// Для mihomo IP-списки получают веб-порты, остальные IP-условия — без изменений.
+func TestSplitIPLists(t *testing.T) {
+	r := PlanRule{CIDRs: []string{"203.0.113.0/24"}, IPLists: map[string]string{"refilter-ips": "x"}, Action: "proxy"}
+	rest, lists := r.SplitIPLists()
+	if rest == nil || len(rest.IPLists) != 0 || len(rest.CIDRs) != 1 || len(rest.Ports) != 0 {
+		t.Fatalf("rest: %+v", rest)
+	}
+	if lists == nil || len(lists.CIDRs) != 0 || len(lists.IPLists) != 1 || len(lists.Ports) != len(WebPorts) {
+		t.Fatalf("lists: %+v", lists)
+	}
+	withPorts := PlanRule{IPLists: map[string]string{"refilter-ips": "x"}, Ports: []int{6881}}
+	if rest, lists := withPorts.SplitIPLists(); lists != nil || rest == nil || len(rest.Ports) != 1 {
+		t.Fatalf("явные порты должны остаться как есть: %+v %+v", rest, lists)
+	}
+}

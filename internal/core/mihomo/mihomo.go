@@ -282,6 +282,11 @@ func render(cfg *model.Config, plan *core.Plan, env core.Env) ([]byte, error) {
 		}
 		d, ip := r.SplitDomainIP()
 		parts := []*core.PlanRule{d, ip}
+		if ip != nil {
+			// IP-списки — только для веб-портов (см. core.SplitIPLists).
+			rest, lists := ip.SplitIPLists()
+			parts = []*core.PlanRule{d, rest, lists}
+		}
 		if d == nil && ip == nil {
 			parts = []*core.PlanRule{&r}
 		}
