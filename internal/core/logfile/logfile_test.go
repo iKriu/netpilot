@@ -44,3 +44,30 @@ func TestTrim(t *testing.T) {
 		t.Fatalf("журнал %q, старый %d байт", cur, len(old))
 	}
 }
+
+// Новый запуск не стирает журнал прошлого: он остаётся в .1.
+func TestCreateKeepsPrevious(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "core.log")
+	if err := os.WriteFile(path, []byte("прошлый запуск\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w, err := Create(path, MaxSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = w.Write([]byte("новый\n"))
+	w.Close()
+	prev, _ := os.ReadFile(path + ".1")
+	cur, _ := os.ReadFile(path)
+	if string(prev) != "прошлый запуск\n" || string(cur) != "новый\n" {
+		t.Fatalf(".1=%q текущий=%q", prev, cur)
+	}
+	// Пустой журнал (ядро упало, ничего не написав) не затирает сохранённый.
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	KeepPrevious(path)
+	if prev2, _ := os.ReadFile(path + ".1"); string(prev2) != "прошлый запуск\n" {
+		t.Fatalf("пустой журнал затёр сохранённый: %q", prev2)
+	}
+}

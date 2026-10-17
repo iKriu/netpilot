@@ -23,13 +23,26 @@ type Writer struct {
 	size int64
 }
 
-// Create создаёт журнал заново (прежнее содержимое не нужно — это прошлый запуск).
+// Create начинает журнал нового запуска. Журнал прошлого запуска переносится
+// в path+".1", а не стирается: после сбоя ядро часто перезапускают по
+// нескольку раз подряд, и иначе причина сбоя пропадала бы вместе с журналом.
 func Create(path string, max int64) (*Writer, error) {
+	KeepPrevious(path)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return nil, err
 	}
 	return &Writer{path: path, max: max, f: f}, nil
+}
+
+// KeepPrevious переносит непустой журнал в path+".1" (прежняя копия
+// заменяется). Пустой журнал — нечего хранить, старая копия остаётся.
+func KeepPrevious(path string) {
+	if st, err := os.Stat(path); err != nil || st.Size() == 0 {
+		return
+	}
+	_ = os.Remove(path + ".1")
+	_ = os.Rename(path, path+".1")
 }
 
 func (w *Writer) Write(p []byte) (int, error) {
