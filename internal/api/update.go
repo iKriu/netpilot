@@ -37,7 +37,7 @@ func (s *Server) registerUpdate() {
 			if err := s.auth.Verify(clientIP(r), req.Password); err != nil {
 				time.Sleep(400 * time.Millisecond) // как при входе: подбор медленнее
 				var locked auth.LockedError
-				if errors.As(err, &locked) {
+				if errors.As(err, &locked) || errors.Is(err, auth.ErrBusy) {
 					replyStatus(w, http.StatusTooManyRequests, err)
 					return
 				}

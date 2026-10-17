@@ -94,3 +94,29 @@ func TestSetupCode(t *testing.T) {
 		t.Fatal("код одноразовый")
 	}
 }
+
+func TestVerifyLockoutAndNoSession(t *testing.T) {
+	a, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Setup("correct-horse"); err != nil {
+		t.Fatal(err)
+	}
+	sessions := len(a.state.Sessions)
+	if err := a.Verify("10.0.0.5", "correct-horse"); err != nil {
+		t.Fatalf("верный пароль: %v", err)
+	}
+	if len(a.state.Sessions) != sessions {
+		t.Fatal("Verify не должен создавать сессию")
+	}
+	for i := 0; i < maxFailures; i++ {
+		if err := a.Verify("10.0.0.5", "wrong"); err != ErrWrong {
+			t.Fatalf("попытка %d: %v", i, err)
+		}
+	}
+	var locked LockedError
+	if err := a.Verify("10.0.0.5", "correct-horse"); !errors.As(err, &locked) {
+		t.Fatalf("после %d ошибок ждали блокировку, получили %v", maxFailures, err)
+	}
+}
