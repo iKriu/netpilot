@@ -97,7 +97,7 @@ fun AuthScreen(setup: Boolean) {
                             if (busy) LoadingIndicator(Modifier.size(24.dp), color = LocalContentColor.current)
                             else Text(if (setup) "Сохранить и войти" else "Войти", style = ButtonDefaults.textStyleFor(ButtonDefaults.MediumContainerHeight))
                         }
-                        if (!setup) Text("Забыли пароль — задайте новый на устройстве командой netpilot -password", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                        if (!setup) Text("Забыли пароль — удалите файл auth.json в папке данных NetPilot и перезапустите его: появится код первой настройки", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
                     }
                 }
             }

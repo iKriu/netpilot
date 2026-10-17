@@ -38,7 +38,8 @@ export async function openPicker(onSaved) {
   let picked = settings.defaultTarget || '';
   let tab = 'groups', q = '';
   const lat = Object.assign({}, state.latency, (auto && auto.latency) || {});
-  const list = h('div', { class: 'card list', style: 'overflow:hidden' });
+  // Прокручивается сам список: поиск и вкладки над ним остаются на месте.
+  const list = h('div', { class: 'card list scroll' });
   const autoOf = id => auto && arr(auto.groups).find(g => g.groupId === id && (id || g.name === 'Авто'));
   const latOf = id => { const l = lat[id]; return l && l.ms ? l : null; };
 
@@ -188,7 +189,7 @@ export async function pageServers() {
             : n.subscriptionId ? [h('br'), h('span', { class: 'meta' }, subName(n.subscriptionId))] : null),
         h('span', { class: 'col hide-m', style: 'width:150px' }, h('span', { class: 'tag' }, [n.protocol, n.security && n.security !== 'none' ? n.security : n.transport && n.transport !== 'tcp' ? n.transport : ''].filter(Boolean).join(' · '))),
         h('span', { class: 'col', style: 'width:150px', 'data-lat': n.id }, latencyEl(state.latency[n.id])),
-        h('span', { class: 'col', style: 'display:flex;gap:2px' },
+        h('span', { class: 'col acts', style: 'width:116px' },
           h('button', { class: 'ib', 'aria-label': 'Проверить', title: 'Проверить', onclick: () => testOne(n.id) }, icon('test', 's')),
           h('button', { class: 'ib hide-m', 'aria-label': 'Изменить', title: 'Изменить', onclick: () => editNode(n) }, icon('edit', 's')),
           h('button', { class: 'ib danger hide-m', 'aria-label': 'Удалить', title: 'Удалить', onclick: () => confirmModal(`Удалить сервер «${n.name}»?`, () => removeChecked('DELETE', '/nodes/' + n.id, () => { state.refreshCounts && state.refreshCounts(); refreshActive(); route(); })) }, icon('trash', 's'))))),
@@ -198,7 +199,7 @@ export async function pageServers() {
   };
   drawList();
   const counts = { ok: () => nodes.filter(n => state.latency[n.id] && state.latency[n.id].ms > 0).length };
-  const listCard = h('section', { class: 'card', style: 'overflow:hidden' },
+  const listCard = h('section', { class: 'card tbl', style: 'overflow:hidden' },
     h('div', { class: 'ch', style: 'gap:10px' },
       h('label', { class: 'search', style: 'flex:1 1 220px;width:auto;border-color:var(--line)' }, icon('search', 's'),
         h('input', { type: 'search', placeholder: 'Страна, название, протокол', 'aria-label': 'Поиск сервера', oninput: e => { q = e.target.value.toLowerCase(); shown = 80; drawList(); } })),

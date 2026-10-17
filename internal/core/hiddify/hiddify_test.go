@@ -2,6 +2,7 @@ package hiddify
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -139,4 +140,24 @@ func TestInstallFromGitHub(t *testing.T) {
 		t.Fatalf("ядро не запускается: %v %s", err, out)
 	}
 	t.Logf("установлено %s: %s", v, strings.SplitN(string(out), "\n", 2)[0])
+}
+
+// Hiddify собран на sing-box 1.13: поле, которого там нет, роняет запуск
+// («unknown field»). Журнал — только с полями, известными 1.13.
+func TestRenderLogCompatible113(t *testing.T) {
+	data, err := New(t.TempDir()).Render(model.Defaults(), core.Env{OS: "linux"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var conf struct {
+		Log map[string]any `json:"log"`
+	}
+	if err := json.Unmarshal(data, &conf); err != nil {
+		t.Fatal(err)
+	}
+	for k := range conf.Log {
+		if k != "level" && k != "timestamp" && k != "output" && k != "disabled" {
+			t.Errorf("поле log.%s неизвестно sing-box 1.13", k)
+		}
+	}
 }

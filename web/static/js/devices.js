@@ -128,7 +128,7 @@ export async function pageDevices() {
         h('button', { class: 'btn', onclick: e => scan(e.currentTarget) }, icon('refresh', 's'), 'Найти в сети'),
         h('button', { class: 'btn p', onclick: () => openDevice() }, icon('plus', 's'), 'Добавить')),
       arr(net.warnings).map(w => notice('', 'alert', w)),
-      h('section', { class: 'card', style: 'overflow:hidden' }, devState.selected.size ? bulkbar : toolbar,
+      h('section', { class: 'card tbl', style: 'overflow:hidden' }, devState.selected.size ? bulkbar : toolbar,
         h('div', { class: 'thead' }, h('span', { style: 'width:18px' }), h('span', { class: 'grow', style: 'padding-left:52px' }, 'Устройство'), h('span', { class: 'col', style: 'width:170px' }, 'Адрес'),
           h('span', { class: 'col hide-t', style: 'width:150px' }, 'Трафик сейчас'), h('span', { class: 'col', style: 'width:200px' }, 'Маршрут'), h('span', { class: 'col', style: 'width:18px' })),
         tableBox));
