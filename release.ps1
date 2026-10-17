@@ -2,9 +2,12 @@
 #   .\release.ps1 -Version 0.1.1 -Notes "Что изменилось"
 #   .\release.ps1 -Version 0.1.1 -NotesFile notes.md
 #   .\release.ps1 -Version 0.1.1 -DryRun    — только собрать и подготовить файлы
+#   .\release.ps1 -Version 0.1.1 -KeyFile D:\keys\release.key — другой закрытый ключ
 #
 # Собирает все платформы, кладёт в dist\release сборки с именами
-# netpilot-<система>-<архитектура> и SHA256SUMS, публикует релиз v<версия>
+# netpilot-<система>-<архитектура>, SHA256SUMS и его подпись SHA256SUMS.sig
+# (ключ ed25519, по умолчанию %USERPROFILE%\.netpilot\release.key; открытый
+# ключ release.pub из корня репозитория встраивается в сборки), публикует релиз v<версия>
 # через GitHub CLI (gh). Устройства увидят обновление при следующей проверке,
 # а установится оно только после нажатия «Обновить» в интерфейсе.
 param(
@@ -13,13 +16,28 @@ param(
     [string]$NotesFile = "",
     [string]$Repo = "iKriu/netpilot",
     [switch]$DryRun,
-    [switch]$SkipM3 # не пересобирать интерфейс Material 3 (взять готовый из web\static\m3)
+    [switch]$SkipM3, # не пересобирать интерфейс Material 3 (взять готовый из web\static\m3)
+    [string]$KeyFile = (Join-Path $env:USERPROFILE ".netpilot\release.key")
 )
 
 $ErrorActionPreference = "Stop"
 $Root = $PSScriptRoot
 $Version = $Version.TrimStart("v")
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Версия указывается как 0.1.1" }
+
+# Ключи проверяем до долгой сборки. Релиз без подписи или сборки без
+# встроенного ключа не выпускаем: первые не установятся, вторые ставили бы что угодно.
+$PubFile = Join-Path $Root "release.pub"
+$Sign = Test-Path $KeyFile
+$howTo = "Создайте ключ: go run ./tools/releasekey -gen (закрытый ключ ляжет в $env:USERPROFILE\.netpilot, его не коммитят), затем скопируйте release.pub оттуда в корень репозитория и закоммитьте."
+if (-not (Test-Path $PubFile)) {
+    if (-not $DryRun) { throw "Нет release.pub в корне репозитория — сборки не смогут проверять подпись обновлений. $howTo" }
+    Write-Host "Нет release.pub — пробная сборка без проверки подписи" -ForegroundColor Yellow
+}
+if (-not $Sign) {
+    if (-not $DryRun) { throw "Не найден закрытый ключ подписи $KeyFile (укажите другой через -KeyFile). $howTo" }
+    Write-Host "Нет ключа $KeyFile — SHA256SUMS не будет подписан" -ForegroundColor Yellow
+}
 
 if (-not $DryRun) {
     if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { throw "Нужен GitHub CLI (gh)" }
@@ -72,6 +90,27 @@ foreach ($src in $names.Keys | Sort-Object) {
 }
 # Окончания строк LF: файл читают устройства на Linux.
 [IO.File]::WriteAllText((Join-Path $out "SHA256SUMS"), ($sums -join "`n") + "`n")
+
+# Подпись SHA256SUMS и сразу проверка ключом, встроенным в сборки: если
+# release.pub и закрытый ключ не пара, релиз не установится ни на одном устройстве.
+if ($Sign) {
+    $Go = (Get-Command go -ErrorAction SilentlyContinue).Source
+    if (-not $Go) { $Go = Join-Path $Root ".tools\go\bin\go.exe" }
+    $sumsFile = Join-Path $out "SHA256SUMS"
+    Push-Location $Root
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Go run ./tools/releasekey -sign -key $KeyFile $sumsFile
+        if ($LASTEXITCODE -ne 0) { throw "Не удалось подписать SHA256SUMS" }
+        if (Test-Path $PubFile) {
+            & $Go run ./tools/releasekey -verify -pub $PubFile $sumsFile
+            if ($LASTEXITCODE -ne 0) { throw "Ключ $KeyFile не пара к release.pub — устройства отвергнут такой релиз" }
+        }
+    } finally {
+        $ErrorActionPreference = "Stop"
+        Pop-Location
+    }
+}
 
 # Проверка: Windows-сборка сообщает ту версию, которую выпускаем.
 $reported = (& (Join-Path $out "netpilot-windows-amd64.exe") -version).Trim()

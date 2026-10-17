@@ -83,11 +83,43 @@ export async function pageSettings() {
             lat.notes && h('div', { class: 'card cb', style: 'white-space:pre-wrap;font-size:13px;color:var(--ink2)' }, lat.notes)],
           actions: [{ label: 'Обновить', primary: true, onClick: () => { runInstall(lat.version); } }] }) }, icon('download', 's'), 'Обновить')),
       u.error && h('div', { style: 'padding:0 20px 14px' }, notice('bad', 'alert', u.error)),
+      u.signed === false && h('div', { style: 'padding:0 20px 14px' }, notice('', 'shield', 'Сборка без проверки подписи: обновление сверяется только с контрольной суммой из того же релиза. Ставьте его, только если доверяете источнику.')),
       h('div', { class: 'list' },
         row('Проверять раз в 6 часов', 'Только сообщает о новой версии',
           sw(u.autoCheck, v => { u.autoCheck = v; stage('update-auto', async () => { await api('PUT', '/update', { repo: u.repo, autoCheck: v }); }); }, null)),
+        row('Источник обновлений', `github.com/${u.repo || ''}` + (u.hasToken ? ' · с токеном' : ''),
+          h('button', { class: 'btn sm', onclick: editUpdSource }, 'Изменить')),
         u.previous && row('Предыдущая версия', `${u.previous} — сохранена для отката`,
           h('button', { class: 'btn sm d', onclick: () => confirmModal(`Вернуть версию ${u.previous}? Программа перезапустится.`, async () => { await api('POST', '/update/rollback'); waitRestart(); }, 'Вернуть') }, 'Вернуть ' + u.previous))));
+  };
+  // Источник решает, какая программа будет установлена, поэтому сервер
+  // требует текущий пароль при смене репозитория или токена.
+  const editUpdSource = () => {
+    let dropToken = false;
+    const norm = v => v.trim().replace(/^(https:\/\/)?github\.com\//, '').replace(/^\/+|\/+$/g, '');
+    const repo = h('input', { class: 'inp', value: u.repo || '', placeholder: 'владелец/имя', spellcheck: 'false', oninput: () => sync() });
+    const token = h('input', { class: 'inp', type: 'password', autocomplete: 'off', placeholder: u.hasToken ? 'сохранён' : 'не задан', oninput: () => sync() });
+    const pw = h('input', { class: 'inp', type: 'password', autocomplete: 'current-password' });
+    const pwBox = field('Текущий пароль', pw, 'Подтверждает смену источника обновлений');
+    const changed = () => norm(repo.value) !== (u.repo || '') || token.value.trim() !== '' || dropToken;
+    const sync = () => { pwBox.style.display = changed() ? '' : 'none'; };
+    sync();
+    modal({
+      title: 'Источник обновлений', size: 'mid',
+      body: [field('Репозиторий GitHub', repo, 'Откуда берутся новые версии'),
+        field('Токен GitHub', token, u.hasToken ? 'Пусто — оставить сохранённый' : 'Нужен только для закрытого репозитория'),
+        u.hasToken && sw(false, v => { dropToken = v; token.disabled = v; sync(); }, 'Удалить сохранённый токен'),
+        pwBox],
+      actions: [{ label: 'Сохранить', primary: true, onClick: async () => {
+        if (!changed()) return;
+        if (!pw.value) { pw.focus(); throw new Error('Введите текущий пароль'); }
+        const body = { repo: norm(repo.value), autoCheck: u.autoCheck, password: pw.value };
+        if (dropToken) body.token = ''; else if (token.value.trim()) body.token = token.value.trim();
+        Object.assign(u, await api('PUT', '/update', body));
+        toast('Источник обновлений изменён', 'ok');
+        loadUpdate(); drawUpd();
+      } }],
+    });
   };
   drawUpd();
 

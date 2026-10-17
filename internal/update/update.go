@@ -1,8 +1,9 @@
 // Package update — обновление самой программы из GitHub Releases.
 //
 // Программа только проверяет наличие новой версии; ставит её человек кнопкой.
-// Установка безопасна: файл сверяется с SHA256SUMS из того же релиза,
-// новая программа пробно запускается с -version, текущая сохраняется для
+// Установка безопасна: SHA256SUMS релиза проверяется по подписи ed25519
+// (открытый ключ встроен в программу при сборке), файл сверяется с суммой
+// из него, новая программа пробно запускается с -version, текущая сохраняется для
 // отката. Если после установки новая версия несколько раз подряд не смогла
 // проработать и минуты, при следующем запуске возвращается предыдущая.
 package update
@@ -10,7 +11,9 @@ package update
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -33,12 +36,26 @@ import (
 // Задаётся при сборке через -ldflags, в настройках можно указать другой.
 var DefaultRepo = "iKriu/netpilot"
 
+// PublicKey — открытый ключ ed25519 (base64), которым подписан SHA256SUMS
+// каждого релиза. Задаётся при сборке:
+//
+//	-ldflags "-X netpilot/internal/update.PublicKey=..."
+//
+// Ключ зашит в программу, а не берётся из настроек: смена репозитория или
+// захват релиза на GitHub не дают поставить чужую сборку. Пусто — сборка
+// разработчика: подпись не проверяется, интерфейс об этом предупреждает.
+var PublicKey = ""
+
 const (
 	checkEvery   = 6 * time.Hour
 	firstCheck   = 2 * time.Minute
 	healthyAfter = 90 * time.Second // столько новая версия должна проработать
 	maxAttempts  = 3                // запусков без «здоровой» минуты до отката
 	sumsAsset    = "SHA256SUMS"
+	sigAsset     = sumsAsset + ".sig"
+	// InstallTimeout — предел на всю установку: на медленном канале роутера
+	// скачивание долгое, но зависнуть навсегда оно не должно.
+	InstallTimeout = 15 * time.Minute
 )
 
 // Release — последняя опубликованная версия.
@@ -50,7 +67,7 @@ type Release struct {
 	Asset       string `json:"asset,omitempty"` // "" — нет сборки для этого устройства
 	Size        int64  `json:"size,omitempty"`
 
-	assetURL, sumsURL string
+	assetURL, sumsURL, sigURL string
 }
 
 type prefs struct {
@@ -86,6 +103,7 @@ type State struct {
 	Progress    *Progress `json:"progress,omitempty"`
 	CanRestart  bool      `json:"canRestart"`
 	Development bool      `json:"development"`
+	Signed      bool      `json:"signed"` // false — сборка без проверки подписи
 }
 
 // Progress — ход установки: этап и, при скачивании, сколько байт получено.
@@ -101,11 +119,12 @@ type Updater struct {
 	dir     string // data/update
 	exe     string // путь к исполняемому файлу, определяется при старте
 
-	mu         sync.Mutex
-	p          prefs
-	installing bool
-	progress   Progress
-	restart    chan struct{}
+	mu          sync.Mutex
+	p           prefs
+	installing  bool
+	rollingBack bool
+	progress    Progress
+	restart     chan struct{}
 }
 
 // New читает настройки и выполняет проверку после обновления: считает запуски
@@ -156,6 +175,7 @@ func (u *Updater) State() State {
 		Repo: u.repo(), HasToken: u.p.Token != "", AutoCheck: u.autoCheck(),
 		CheckedAt: u.p.CheckedAt, Latest: u.p.Latest, Error: u.p.LastError,
 		Installing: u.installing, CanRestart: u.exe != "", Development: u.version == "dev",
+		Signed: PublicKey != "",
 	}
 	if u.installing {
 		pr := u.progress
@@ -170,17 +190,38 @@ func (u *Updater) State() State {
 	return st
 }
 
-// SetPrefs меняет источник и автопроверку. token: nil — не менять, "" — удалить.
-func (u *Updater) SetPrefs(repo string, token *string, autoCheck bool) error {
+// normRepo приводит репозиторий к виду владелец/имя; "" — репозиторий по умолчанию.
+func normRepo(repo string) (string, error) {
 	repo = strings.Trim(strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(repo, "https://github.com/"), "github.com/")), "/")
 	if repo != "" && strings.Count(repo, "/") != 1 {
-		return errors.New("репозиторий указывается как владелец/имя, например iKriu/netpilot")
+		return "", errors.New("репозиторий указывается как владелец/имя, например iKriu/netpilot")
 	}
-	u.mu.Lock()
-	defer u.mu.Unlock()
 	if repo == DefaultRepo {
 		repo = ""
 	}
+	return repo, nil
+}
+
+// ChangesSource — меняют ли эти настройки источник обновлений (репозиторий
+// или токен). Такое изменение подтверждается паролем.
+func (u *Updater) ChangesSource(repo string, token *string) bool {
+	repo, err := normRepo(repo)
+	if err != nil {
+		return false // SetPrefs всё равно откажет
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return repo != u.p.Repo || (token != nil && strings.TrimSpace(*token) != u.p.Token)
+}
+
+// SetPrefs меняет источник и автопроверку. token: nil — не менять, "" — удалить.
+func (u *Updater) SetPrefs(repo string, token *string, autoCheck bool) error {
+	repo, err := normRepo(repo)
+	if err != nil {
+		return err
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
 	if repo != u.p.Repo {
 		u.p.Latest, u.p.LastError, u.p.CheckedAt = nil, "", 0
 	}
@@ -244,6 +285,10 @@ func (u *Updater) Install(ctx context.Context) error {
 		u.mu.Unlock()
 		return errors.New("обновление уже выполняется")
 	}
+	if u.rollingBack {
+		u.mu.Unlock()
+		return errors.New("выполняется возврат предыдущей версии")
+	}
 	if u.exe == "" {
 		u.mu.Unlock()
 		return errors.New("не удалось определить путь к программе")
@@ -275,9 +320,9 @@ func (u *Updater) Install(ctx context.Context) error {
 		return fmt.Errorf("установлена актуальная версия %s", u.version)
 	}
 
-	sums, err := download(ctx, rel.sumsURL, token, 1<<20)
+	sums, err := fetchSums(ctx, rel, token)
 	if err != nil {
-		return fmt.Errorf("контрольные суммы: %w", err)
+		return err
 	}
 	want := findSum(sums, rel.Asset)
 	if want == "" {
@@ -322,11 +367,26 @@ func (u *Updater) Install(ctx context.Context) error {
 // Rollback возвращает версию, сохранённую при последнем обновлении.
 func (u *Updater) Rollback() error {
 	u.mu.Lock()
+	// Во время установки previous и сам исполняемый файл переписываются:
+	// откат в этот момент оставил бы смесь двух версий.
+	if u.installing {
+		u.mu.Unlock()
+		return errors.New("идёт установка обновления, вернуть предыдущую версию сейчас нельзя")
+	}
+	if u.rollingBack {
+		u.mu.Unlock()
+		return errors.New("возврат уже выполняется")
+	}
 	prev := u.p.Previous
+	u.rollingBack = true
 	u.mu.Unlock()
+	defer func() { u.mu.Lock(); u.rollingBack = false; u.mu.Unlock() }()
 	src := u.file(prevName())
 	if prev == "" || !fileExists(src) {
 		return errors.New("предыдущая версия не сохранена")
+	}
+	if u.exe == "" {
+		return errors.New("не удалось определить путь к программе")
 	}
 	if err := u.restorePrevious(); err != nil {
 		return err
@@ -411,7 +471,10 @@ type ghRelease struct {
 	} `json:"assets"`
 }
 
-var client = &http.Client{Timeout: 5 * time.Minute}
+// Общего тайм-аута у клиента нет: сроки задают контексты (30 с на запрос
+// к API, InstallTimeout на установку). Тайм-аут клиента обрывал бы
+// скачивание сборки на медленном канале раньше, чем истечёт срок установки.
+var client = &http.Client{}
 
 // apiBase можно подменить для проверки на тестовом сервере.
 var apiBase = func() string {
@@ -466,12 +529,63 @@ func fetchLatest(ctx context.Context, repo, token string) (*Release, error) {
 			rel.Asset, rel.Size, rel.assetURL = a.Name, a.Size, link(a.URL, a.BrowserDownloadURL)
 		case sumsAsset:
 			rel.sumsURL = link(a.URL, a.BrowserDownloadURL)
+		case sigAsset:
+			rel.sigURL = link(a.URL, a.BrowserDownloadURL)
 		}
 	}
 	if rel.Asset != "" && rel.sumsURL == "" {
 		return nil, fmt.Errorf("в релизе %s нет файла %s — ставить без проверки нельзя", rel.Version, sumsAsset)
 	}
+	// Сообщаем уже при проверке, а не только после нажатия «Обновить».
+	if rel.Asset != "" && PublicKey != "" && rel.sigURL == "" {
+		return nil, errUnsigned(rel.Version)
+	}
 	return rel, nil
+}
+
+func errUnsigned(version string) error {
+	return fmt.Errorf("релиз %s не подписан (нет файла %s) — ставить его нельзя", version, sigAsset)
+}
+
+// fetchSums скачивает SHA256SUMS и, если в программу встроен ключ, проверяет
+// его подпись. Суммы используются только после успешной проверки: подпись
+// охватывает ровно скачанные байты, поэтому подменить ни одну строку нельзя.
+func fetchSums(ctx context.Context, rel *Release, token string) ([]byte, error) {
+	sums, err := download(ctx, rel.sumsURL, token, 1<<20)
+	if err != nil {
+		return nil, fmt.Errorf("контрольные суммы: %w", err)
+	}
+	if PublicKey == "" {
+		return sums, nil
+	}
+	if rel.sigURL == "" {
+		return nil, errUnsigned(rel.Version)
+	}
+	sig, err := download(ctx, rel.sigURL, token, 4<<10)
+	if err != nil {
+		return nil, fmt.Errorf("подпись релиза: %w", err)
+	}
+	if err := verifySums(sums, sig); err != nil {
+		return nil, err
+	}
+	return sums, nil
+}
+
+// verifySums проверяет подпись (base64 в файле .sig) встроенным ключом.
+func verifySums(sums, sig []byte) error {
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(PublicKey))
+	if err != nil || len(key) != ed25519.PublicKeySize {
+		// Сборка испорчена — безопаснее не ставить ничего.
+		return errors.New("встроенный ключ проверки подписи повреждён — обновление невозможно, установите новую версию вручную")
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(sig)))
+	if err != nil || len(raw) != ed25519.SignatureSize {
+		return fmt.Errorf("файл %s повреждён — обновление отменено", sigAsset)
+	}
+	if !ed25519.Verify(ed25519.PublicKey(key), sums, raw) {
+		return errors.New("подпись релиза не прошла проверку — файлы подменены или подписаны чужим ключом, обновление отменено")
+	}
+	return nil
 }
 
 func get(ctx context.Context, url, token string) (*http.Response, error) {

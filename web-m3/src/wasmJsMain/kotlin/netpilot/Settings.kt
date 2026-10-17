@@ -86,6 +86,7 @@ fun SettingsPage() {
                     }
                 }
                 if (u.s("error").isNotEmpty()) Notice(u.s("error"), Tone.Err, Icons.Rounded.Error)
+                if (u["signed"] != null && !u.b("signed")) Notice("Сборка без проверки подписи: обновление сверяется только с контрольной суммой из того же релиза. Ставьте его, только если доверяете источнику.", Tone.Warn, Icons.Rounded.Warning)
                 if (u.b("available") && latest?.s("notes").orEmpty().isNotEmpty()) Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.6f)) {
                     Text(latest!!.s("notes"), Modifier.padding(14.dp), style = MaterialTheme.typography.bodySmall)
                 }
@@ -106,14 +107,19 @@ fun SettingsPage() {
                     }
                 }
                 SegGroup {
-                    val n = if (u.s("previous").isNotEmpty()) 2 else 1
+                    val n = if (u.s("previous").isNotEmpty()) 3 else 2
                     SwitchRow(0, n, "Проверять раз в 6 часов", "Только сообщает о новой версии", Icons.Rounded.Schedule, autoCheck) { v ->
                         autoCheck = v
                         if (v == u.b("autoCheck")) app.pending.remove("update-auto") else app.stage("update-auto") { Api.put("/update", jobj("repo" to u.s("repo"), "autoCheck" to v)) }
                     }
+                    var editSource by remember { mutableStateOf(false) }
+                    SettingRow(1, n, "Источник обновлений", "github.com/${u.s("repo")}" + (if (u.b("hasToken")) " · с токеном" else ""), Icons.Rounded.Link) {
+                        OutlinedButton(onClick = { editSource = true }, shapes = ButtonDefaults.shapes()) { Text("Изменить") }
+                    }
+                    if (editSource) UpdateSourceDialog(u, autoCheck, onDismiss = { editSource = false }) { nu -> u = nu; app.update = nu }
                     if (u.s("previous").isNotEmpty()) {
                         var confirm by remember { mutableStateOf(false) }
-                        SettingRow(1, 2, "Предыдущая версия ${u.s("previous")}", "Сохранена для отката", Icons.Rounded.History) { OutlinedButton(onClick = { confirm = true }, shapes = ButtonDefaults.shapes()) { Text("Вернуть") } }
+                        SettingRow(2, n, "Предыдущая версия ${u.s("previous")}", "Сохранена для отката", Icons.Rounded.History) { OutlinedButton(onClick = { confirm = true }, shapes = ButtonDefaults.shapes()) { Text("Вернуть") } }
                         if (confirm) ConfirmDialog("Вернуть версию ${u.s("previous")}? Программа перезапустится.", confirm = "Вернуть", onDismiss = { confirm = false }) {
                             Api.post("/update/rollback"); waitRestart(app, null)
                         }
@@ -334,6 +340,53 @@ private fun CoreRow(i: Int, n: Int, c: J, running: Boolean) {
 }
 
 // ---------- обновление программы ----------
+
+/**
+ * Смена репозитория или токена. Источник решает, какая программа будет
+ * установлена, поэтому сервер требует текущий пароль при его смене.
+ */
+@Composable
+private fun UpdateSourceDialog(u: J, autoCheck: Boolean, onDismiss: () -> Unit, onSaved: (J) -> Unit) {
+    val app = LocalApp.current
+    fun norm(v: String) = v.trim().removePrefix("https://").removePrefix("github.com/").trim('/')
+    var repo by remember { mutableStateOf(u.s("repo")) }
+    var token by remember { mutableStateOf("") }
+    var dropToken by remember { mutableStateOf(false) }
+    var password by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf("") }
+    val changed = norm(repo) != u.s("repo") || token.isNotBlank() || dropToken
+    AppDialog(onDismiss, "Источник обновлений", width = 520.dp, actions = { d ->
+        TextButton(onClick = { d.close {} }) { Text("Отмена") }
+        BusyButton("Сохранить", enabled = !changed || password.isNotEmpty()) {
+            if (!changed) { d.close {}; return@BusyButton }
+            val body = buildList<Pair<String, Any?>> {
+                add("repo" to norm(repo)); add("autoCheck" to autoCheck); add("password" to password)
+                if (dropToken) add("token" to "") else if (token.isNotBlank()) add("token" to token.trim())
+            }
+            try {
+                val nu = Api.put("/update", jobj(*body.toTypedArray())) as J
+                onSaved(nu)
+                app.toast("Источник обновлений изменён", Kind.Ok)
+                d.close {}
+            } catch (e: ApiError) {
+                error = e.message ?: ""
+            }
+        }
+    }) {
+        Field("Репозиторий GitHub", repo, { repo = it }, placeholder = "владелец/имя", hint = "Откуда берутся новые версии", mono = true)
+        Field("Токен GitHub", if (dropToken) "" else token, { token = it }, password = true,
+            placeholder = if (u.b("hasToken")) "сохранён" else "не задан",
+            hint = if (u.b("hasToken")) "Пусто — оставить сохранённый" else "Нужен только для закрытого репозитория")
+        if (u.b("hasToken")) Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(dropToken, { dropToken = it; if (it) token = "" })
+            Text("Удалить сохранённый токен", style = MaterialTheme.typography.bodyMedium)
+        }
+        if (error.isNotEmpty()) Notice(error, Tone.Err, Icons.Rounded.Error)
+        AnimatedVisibility(changed) {
+            Field("Текущий пароль", password, { password = it; error = "" }, password = true, hint = "Подтверждает смену источника обновлений")
+        }
+    }
+}
 
 val UPDATE_STAGES = listOf("prepare" to "Подготовка", "download" to "Скачивание с GitHub", "verify" to "Проверка контрольной суммы", "probe" to "Пробный запуск новой версии", "install" to "Установка", "restart" to "Перезапуск — сеть пропадёт на 5–10 секунд")
 

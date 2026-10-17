@@ -74,6 +74,17 @@ $env:GOTOOLCHAIN = "local"
 $env:CGO_ENABLED = "0"
 $Version = (Get-Content (Join-Path $Root "VERSION") -Raw).Trim()
 $LdFlags = "-s -w -X netpilot/internal/app.Version=$Version"
+# Открытый ключ подписи релизов: программа будет ставить только обновления,
+# подписанные парным закрытым ключом (tools\releasekey). Без release.pub —
+# сборка разработчика, интерфейс предупредит, что подпись не проверяется.
+$PubFile = Join-Path $Root "release.pub"
+if (Test-Path $PubFile) {
+    $Pub = (Get-Content $PubFile -Raw).Trim()
+    if ($Pub -notmatch '^[A-Za-z0-9+/]{43}=$') { throw "release.pub: это не открытый ключ ed25519 в base64" }
+    $LdFlags += " -X netpilot/internal/update.PublicKey=$Pub"
+} else {
+    Write-Host "release.pub не найден — сборка без проверки подписи обновлений" -ForegroundColor Yellow
+}
 
 $matrix = @{
     "windows" = @(@{ GOOS = "windows"; GOARCH = "amd64"; Out = "netpilot.exe" })
