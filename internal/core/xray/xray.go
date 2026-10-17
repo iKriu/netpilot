@@ -252,7 +252,7 @@ func render(cfg *model.Config, plan *core.Plan, env core.Env) ([]byte, error) {
 
 	conf := M{
 		"log":       M{"loglevel": xrayLogLevel(s.LogLevel)},
-		"dns":       M{"servers": []any{xrayDNS(s.DNSRemote), xrayDNS(s.DNSDirect)}},
+		"dns":       M{"servers": []any{xrayDNS(s.DNSRemote), xrayDNS(core.DirectDNS(s, env))}},
 		"inbounds":  inbounds,
 		"outbounds": outbounds,
 		"routing": M{

@@ -53,6 +53,12 @@ func (a *App) coreExited(ex core.Exiter, gen uint64) {
 	}
 	name, reason := a.active.Name(), ex.ExitReason()
 	log.Printf("ядро %s неожиданно завершилось: %s", name, reason)
+	a.coreFailedLocked(name, "неожиданно завершилось: "+reason)
+}
+
+// coreFailedLocked — ядро упало или перестало пропускать трафик: остановить
+// его, применить политику при сбое и назначить перезапуск.
+func (a *App) coreFailedLocked(name, what string) {
 	_ = a.active.Stop() // освобождаем состояние процесса и адрес API
 	// Статус больше не «работает», пока ядро не запустится снова.
 	a.active, a.dirty, a.dirtyBySubs = nil, false, false
@@ -61,7 +67,7 @@ func (a *App) coreExited(ex core.Exiter, gen uint64) {
 		// Трафик устройств больше некому принимать — пусть идёт напрямую.
 		a.removeFirewallLocked()
 	}
-	a.scheduleRestartLocked(name, "неожиданно завершилось: "+reason)
+	a.scheduleRestartLocked(name, what)
 }
 
 // failClosed — при падении ядра держать перехват (интернет блокирован), а не

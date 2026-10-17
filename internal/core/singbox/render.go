@@ -168,7 +168,7 @@ func render(cfg *model.Config, env core.Env, external bool) ([]byte, error) {
 		return nil, fmt.Errorf("DNS для прокси: %w", err)
 	}
 	remote["detour"] = tagProxy
-	direct, err := dnsServer(dnsDirect, s.DNSDirect)
+	direct, err := dnsServer(dnsDirect, core.DirectDNS(s, env))
 	if err != nil {
 		return nil, fmt.Errorf("DNS для прямого трафика: %w", err)
 	}

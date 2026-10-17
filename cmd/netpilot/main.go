@@ -63,7 +63,8 @@ func main() {
 	}
 	go a.WatchSubscriptions(watchCtx)
 	go a.WatchTraffic(watchCtx)
-	go a.WatchAuto(watchCtx) // автоматические группы: проверка серверов по одному
+	go a.WatchAuto(watchCtx)   // автоматические группы: проверка серверов по одному
+	go a.WatchHealth(watchCtx) // ядро пропускает трафик: DNS отвечает
 	go upd.Watch(watchCtx)
 
 	static := web.Static()
@@ -117,7 +118,7 @@ func main() {
 	// Сначала ядро: оно снимает системный прокси Windows. Windows завершает
 	// консольную программу примерно через 5 с после закрытия окна — если
 	// раньше ждать веб-сервер, прокси останется указывать на мёртвый порт.
-	_ = a.Stop()
+	_ = a.Shutdown()
 	a.StopRouter()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

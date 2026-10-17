@@ -243,7 +243,7 @@ func Defaults() *Config {
 			DefaultAction:    "proxy",
 			BypassLAN:        true,
 			DNSRemote:        "https://1.1.1.1/dns-query",
-			DNSDirect:        "https://77.88.8.8/dns-query",
+			DNSDirect:        DNSAuto,
 			TestURL:          "https://www.gstatic.com/generate_204",
 			PingMethod:       "auto",
 			LogLevel:         "info",

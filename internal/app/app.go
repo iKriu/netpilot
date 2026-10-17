@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"netpilot/internal/core"
@@ -68,6 +69,12 @@ type App struct {
 
 	fwOn  bool   // перехват трафика включён
 	fwErr string // последняя ошибка nftables
+	dnsFB bool   // включён запасной DNS (ядро не работает, см. dnsFallbackLocked)
+
+	// dnsIdx — какой сервер из model.DirectDNSAuto сейчас прямой DNS (при
+	// «auto»). Атомарный: читается в env() под a.mu и меняется проверкой
+	// живучести без него (health.go).
+	dnsIdx atomic.Int32
 
 	listErrs map[string]string // последние ошибки загрузки списков
 }
@@ -94,7 +101,7 @@ func New(dataDir string) (*App, error) {
 }
 
 func (a *App) env() core.Env {
-	return core.Env{DataDir: a.DataDir, OS: runtime.GOOS, ListsDir: a.listsDir(), Selected: a.autoSelected(), DeviceIPv6: a.allIPv6()}
+	return core.Env{DataDir: a.DataDir, OS: runtime.GOOS, ListsDir: a.listsDir(), Selected: a.autoSelected(), DeviceIPv6: a.allIPv6(), DNSDirect: a.directDNS()}
 }
 
 // allIPv6 — копия IPv6-адресов устройств: окружение ядра живёт дольше
@@ -142,6 +149,7 @@ func (a *App) subsChanged() {
 
 func (a *App) Start() error {
 	a.ensureLists(context.Background(), listsMaxAge) // до блокировки: загрузка бывает долгой
+	a.pickDNS(context.Background())                  // тоже до блокировки: проверка серверов
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.restart.fails = nil // запуск вручную — счёт сбоев с начала
@@ -182,6 +190,9 @@ func (a *App) startLocked() error {
 		_ = a.stopLocked()
 		a.lastErr = "прозрачный режим: " + err.Error()
 		return errors.New(a.lastErr)
+	}
+	if !transparent(cfg.Settings) {
+		a.dnsFallbackLocked(false) // режим сменили на прокси-сервер
 	}
 	return nil
 }
@@ -261,6 +272,7 @@ func (a *App) reloadLocked() error {
 		}
 	} else {
 		a.removeFirewallLocked()
+		a.dnsFallbackLocked(false)
 	}
 	log.Printf("ядро %s: конфигурация применена без остановки", a.active.Name())
 	a.kickAuto() // состав групп или активный сервер могли измениться

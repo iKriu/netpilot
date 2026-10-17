@@ -249,7 +249,7 @@ export async function pageSettings() {
       h('div', { class: 'list' }, row('Адрес для проверки через сервер', 'Отвечает быстро и без содержимого', h('input', { class: 'inp mono', value: s.testUrl, style: 'width:320px;max-width:100%', oninput: e => s.testUrl = e.target.value })))),
     sec('dns', 'DNS', null, h('div', { class: 'cb grid2', style: 'gap:16px' },
       field('Для трафика через прокси', h('input', { class: 'inp mono', value: s.dnsRemote, oninput: e => s.dnsRemote = e.target.value }), 'Запросы идут через сервер. https://, tls://, quic:// или IP'),
-      field('Для прямого трафика', h('input', { class: 'inp mono', value: s.dnsDirect, oninput: e => s.dnsDirect = e.target.value }), 'И для ответов устройствам. local — системный')),
+      field('Для прямого трафика', h('input', { class: 'inp mono', value: s.dnsDirect, oninput: e => s.dnsDirect = e.target.value }), 'И для ответов устройствам. auto — Cloudflare, Google, Quad9, Яндекс последним: NetPilot берёт первый отвечающий и переключается сам; local — системный')),
       h('div', { class: 'list' }, row('Отвечать устройствам через прокси', 'Выключено (рекомендуется): DNS не зависит от серверов. Включено: если сервер упадёт, DNS пропадёт у всей сети', sw(s.dnsViaProxy, v => s.dnsViaProxy = v, null)))),
     sec('lists', 'Списки блокировок', h('button', { class: 'btn sm', onclick: async e => { e.currentTarget.classList.add('busy'); await api('POST', '/lists/update').then(() => toast('Списки обновлены', 'ok'), x => toast(x.message, 'err')); route(); } }, icon('refresh', 's'), 'Обновить'),
       h('div', { class: 'list' }, arr(listsInfo).map(l => h('div', { class: 'row', style: 'padding:14px 20px' },

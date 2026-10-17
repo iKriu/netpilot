@@ -235,6 +235,54 @@ func validPrefixes6(in []string) []string {
 	return out
 }
 
+// DNSFallbackTable — запасной DNS, пока ядро не работает (см. DNSFallbackRuleset).
+const DNSFallbackTable = "netpilot_dnsfb"
+
+// DNSFallbackRuleset — правила для «nft -f -», которые пересылают DNS-запросы
+// устройств к этому серверу на upstream (DNS роутера или провайдера).
+// Нужны, когда ядро прокси не работает: у устройств DNS указан на шлюз, а без
+// ядра на его порту 53 никто не отвечает — и пропадает весь интернет, хотя
+// сам трафик после снятия перехвата идёт напрямую. Маскарадинг — чтобы ответ
+// upstream вернулся через шлюз, а не напрямую устройству (оно его не ждёт).
+func DNSFallbackRuleset(upstream string) (string, error) {
+	ip, err := netip.ParseAddr(upstream)
+	if err != nil || !ip.Is4() {
+		return "", fmt.Errorf("запасной DNS: неверный адрес %q", upstream)
+	}
+	var b strings.Builder
+	w := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
+	w("add table ip %s", DNSFallbackTable)
+	w("delete table ip %s", DNSFallbackTable)
+	w("table ip %s {", DNSFallbackTable)
+	w("\tset lan { type ipv4_addr; flags interval; elements = { %s } }", strings.Join(lanNets, ", "))
+	w("\tchain prerouting {")
+	w("\t\ttype nat hook prerouting priority dstnat; policy accept;")
+	w("\t\tip saddr @lan fib daddr type local meta l4proto { tcp, udp } th dport 53 dnat to %s:53", ip)
+	w("\t}")
+	w("\tchain postrouting {")
+	w("\t\ttype nat hook postrouting priority srcnat; policy accept;")
+	w("\t\tip saddr @lan ip daddr %s meta l4proto { tcp, udp } th dport 53 masquerade", ip)
+	w("\t}")
+	w("}")
+	return b.String(), nil
+}
+
+// firstNameserver — первый IPv4-сервер из resolv.conf, кроме локальных
+// заглушек (127.0.0.53 у systemd-resolved): пересылать DNS устройств нужно
+// туда, куда ходит сама система, а не на loopback.
+func firstNameserver(resolv string) string {
+	for _, line := range strings.Split(resolv, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 || f[0] != "nameserver" {
+			continue
+		}
+		if ip, err := netip.ParseAddr(f[1]); err == nil && ip.Is4() && !ip.IsLoopback() && !ip.IsUnspecified() {
+			return ip.String()
+		}
+	}
+	return ""
+}
+
 // Status — применимость прозрачного режима на этой системе.
 type Status struct {
 	Supported bool     `json:"supported"`
