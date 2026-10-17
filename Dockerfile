@@ -19,4 +19,11 @@ ENV NETPILOT_DATA=/data \
 VOLUME /data
 # 2017 — веб-интерфейс, 7890 — HTTP/SOCKS5 прокси
 EXPOSE 2017 7890
+# Живость — по открытому без входа /api/auth/state (wget есть в busybox alpine).
+# Если NETPILOT_LISTEN сменён на другой порт, поправьте адрес и здесь.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD wget -q -T 4 -O /dev/null http://127.0.0.1:2017/api/auth/state || exit 1
+# USER не задаём сознательно: nftables/TPROXY, pppd и dnsmasq требуют root
+# (вместе с NET_ADMIN в docker-compose.gateway.yml). В обычном режиме прокси
+# контейнер без лишних capabilities, так что root внутри ограничен Docker'ом.
 ENTRYPOINT ["netpilot"]

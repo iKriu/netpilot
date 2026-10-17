@@ -74,6 +74,27 @@ func TestParseManySubscription(t *testing.T) {
 	}
 }
 
+// Управляющие символы из подписки не должны попасть в конфиг ядра:
+// имя чистится, а узел с мусором в технических полях отбрасывается.
+func TestParseControlChars(t *testing.T) {
+	n, err := Parse("vless://id@host.example.com:443#a%0D%0Ab%00c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, n.Name, "a  b c")
+	for _, link := range []string{
+		"vless://id@host:443?path=%0Aevil",
+		"trojan://%00@host:443",
+		"tuic://u:p@h:443?alpn=h3,%0A",
+		"vmess://" + base64.StdEncoding.EncodeToString([]byte(`{"add":"a\nb","port":"1","id":"x"}`)),
+		"vmess://" + base64.StdEncoding.EncodeToString([]byte(`{"add":"a b","port":"1","id":"x"}`)),
+	} {
+		if _, err := Parse(link); err == nil {
+			t.Errorf("%q: ожидалась ошибка", link)
+		}
+	}
+}
+
 func eq[T comparable](t *testing.T, got, want T) {
 	t.Helper()
 	if got != want {

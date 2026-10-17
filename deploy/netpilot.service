@@ -10,8 +10,32 @@ Environment=NETPILOT_LISTEN=0.0.0.0:2017
 Environment=NETPILOT_PROXY_LISTEN=0.0.0.0
 Restart=always
 RestartSec=3
-# Перехват трафика (nftables, TPROXY) требует прав root.
+# Перехват трафика (nftables, TPROXY), pppd и dnsmasq в режиме роутера требуют root.
 User=root
+
+# ---- Ограничения: только те, что не мешают роутеру, прозрачному режиму и самообновлению ----
+# Ни netpilot, ни его дочерние процессы (ip, nft, pppd, dnsmasq) не могут получить
+# новые привилегии через setuid/capabilities файлов — всё и так запускается от root.
+NoNewPrivileges=yes
+# Свой /tmp: чужие процессы не подложат файлы во временный каталог службы.
+PrivateTmp=yes
+# Домашние каталоги пользователей службе не нужны — только чтение.
+ProtectHome=read-only
+# Запрет на загрузку модулей ядра из службы. Модули nftables/TPROXY/ppp,
+# которые ядро подгружает само по запросу, продолжают работать.
+ProtectKernelModules=yes
+# Журнал ядра (dmesg) службе не нужен.
+ProtectKernelLogs=yes
+# Дерево cgroup — только чтение: службе нечего там менять.
+ProtectControlGroups=yes
+# Нельзя сменить персональность процесса (обход ASLR и т.п.).
+LockPersonality=yes
+# Нельзя захватить процессор realtime-приоритетом.
+RestrictRealtime=yes
+# Нельзя создавать setuid/setgid-файлы: обновление ставит обычный исполняемый файл.
+RestrictSUIDSGID=yes
+# Не задаём: ProtectSystem=strict (самообновление пишет в /usr/local/bin, роутер — в
+# /etc/ppp и /run/ppp) и ProtectKernelTunables (нужна запись в /proc/sys/net: ip_forward).
 
 [Install]
 WantedBy=multi-user.target

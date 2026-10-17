@@ -1,0 +1,2 @@
+go test fuzz v1
+string("ss://YWVzLTEyOC1nY206dGVzdA@1.2.3.4:8388#x%0D%0Ay")

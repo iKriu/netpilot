@@ -39,7 +39,20 @@ func ParseMany(text string) (nodes []model.Node, errs []error) {
 	return nodes, errs
 }
 
+// Parse разбирает одну ссылку. Ссылки приходят из подписок сторонних серверов,
+// поэтому результат проходит sanitize: строки узла попадают в конфиги ядер.
 func Parse(link string) (model.Node, error) {
+	n, err := parse(link)
+	if err != nil {
+		return model.Node{}, err
+	}
+	if err := sanitize(&n); err != nil {
+		return model.Node{}, err
+	}
+	return n, nil
+}
+
+func parse(link string) (model.Node, error) {
 	scheme, _, ok := strings.Cut(link, "://")
 	if !ok {
 		return model.Node{}, errors.New("это не ссылка")
@@ -58,8 +71,43 @@ func Parse(link string) (model.Node, error) {
 	case "tuic":
 		return parseTUIC(link)
 	}
-	return model.Node{}, fmt.Errorf("протокол %s пока не поддерживается", scheme)
+	return model.Node{}, fmt.Errorf("протокол %s пока не поддерживается", shorten(scheme))
 }
+
+// sanitize чистит строки узла. Имя — косметика: управляющие символы заменяем
+// пробелами, чтобы не терять узел из-за кривого названия. В технических полях
+// (адрес, ключи, пути) управляющий символ — признак мусора или попытки внедрить
+// строку в конфиг ядра, такой узел отбрасываем целиком.
+func sanitize(n *model.Node) error {
+	n.Name = strings.TrimSpace(strings.Map(func(r rune) rune {
+		if isControl(r) {
+			return ' '
+		}
+		return r
+	}, strings.ToValidUTF8(n.Name, "�")))
+	fields := []*string{
+		&n.Protocol, &n.Server, &n.UUID, &n.Password, &n.Method, &n.Flow,
+		&n.Transport, &n.Path, &n.Host, &n.ServiceName, &n.XHTTPMode,
+		&n.Security, &n.SNI, &n.Fingerprint, &n.PublicKey, &n.ShortID,
+		&n.Obfs, &n.ObfsPassword, &n.Congestion,
+	}
+	for i := range n.ALPN {
+		fields = append(fields, &n.ALPN[i])
+	}
+	for _, f := range fields {
+		if strings.IndexFunc(*f, isControl) >= 0 {
+			return errors.New("недопустимые символы в параметрах узла")
+		}
+	}
+	// Пробел в адресе сервера не бывает законным, а ядра трактуют его по-разному.
+	if strings.ContainsAny(n.Server, " /\\") {
+		return errors.New("неверный адрес сервера")
+	}
+	return check(*n)
+}
+
+// isControl — C0/C1 управляющие символы и DEL (включая \n, \r, NUL).
+func isControl(r rune) bool { return r < 0x20 || (r >= 0x7f && r < 0xa0) }
 
 // vless://uuid@host:port?type=ws&security=reality&...#name
 // trojan://password@host:port?security=tls&...#name
