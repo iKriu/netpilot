@@ -1,0 +1,14 @@
+services:
+  netpilot:
+    build: .
+    image: netpilot:latest
+    container_name: netpilot
+    restart: unless-stopped
+    ports:
+      - "2017:2017" # веб-интерфейс
+      - "7890:7890" # HTTP/SOCKS5 прокси
+    volumes:
+      - ./data:/data
+    environment:
+      # Пароль веб-интерфейса (логин admin). Пусто — без пароля.
+      - NETPILOT_PASSWORD=

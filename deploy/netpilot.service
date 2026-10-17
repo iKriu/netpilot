@@ -1,0 +1,17 @@
+[Unit]
+Description=NetPilot — прокси-шлюз для локальной сети
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/netpilot
+Environment=NETPILOT_DATA=/var/lib/netpilot
+Environment=NETPILOT_LISTEN=0.0.0.0:2017
+Environment=NETPILOT_PROXY_LISTEN=0.0.0.0
+Restart=always
+RestartSec=3
+# Перехват трафика (nftables, TPROXY) требует прав root.
+User=root
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+{
+  "settings": {
+    "mode": "transparent",
+    "transparentScope": "selected",
+    "hijackDns": true,
+    "ipv6": "block",
+    "autoStart": true,
+    "listenAddr": "0.0.0.0"
+  }
+}

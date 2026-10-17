@@ -1,0 +1,45 @@
+# Стенд для проверки прозрачного режима на настоящем ядре Linux:
+# client ходит в интернет через gateway (NetPilot), как телефон через роутер.
+#
+#   docker compose -f test/transparent/docker-compose.yml up -d --build
+#   powershell -File test/transparent/run.ps1
+name: netpilot-lab
+
+networks:
+  lab:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+        - subnet: fd00:30::/64
+
+services:
+  gateway:
+    build: ../..
+    image: netpilot:latest
+    cap_add: [NET_ADMIN]
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv6.conf.all.forwarding=1
+    environment:
+      - NETPILOT_SCAN=0
+      - NETPILOT_ASSUME_LAN=1 # 172.30.0.0/24 здесь — «локальная сеть», а не служебная сеть Docker
+      - NETPILOT_PASSWORD=lab-test-password # только для стенда
+    ports:
+      - "2019:2017"
+    networks:
+      lab:
+        ipv4_address: 172.30.0.2
+        ipv6_address: fd00:30::2
+
+  client:
+    image: alpine:3.22
+    cap_add: [NET_ADMIN]
+    networks:
+      lab:
+        ipv4_address: 172.30.0.10
+        ipv6_address: fd00:30::10
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+    # Сначала ставим утилиты (ещё через обычный шлюз Docker), потом — как телефон за роутером.
+    command: sh -c "apk add --no-cache curl bind-tools >/dev/null && ip route replace default via 172.30.0.2 && ip -6 route replace default via fd00:30::2 && sleep infinity"
