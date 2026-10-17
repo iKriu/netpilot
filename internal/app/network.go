@@ -354,8 +354,9 @@ func (a *App) updateIPv6(neigh map[string][]string) {
 	if neigh == nil {
 		return
 	}
+	cfg := a.Store.Get()
 	next := map[string][]string{}
-	for _, d := range a.Store.Get().Devices {
+	for _, d := range cfg.Devices {
 		if addrs := neigh[scan.NormalizeMAC(d.MAC)]; d.MAC != "" && len(addrs) > 0 {
 			sorted := slices.Clone(addrs)
 			slices.Sort(sorted)
@@ -364,11 +365,22 @@ func (a *App) updateIPv6(neigh map[string][]string) {
 	}
 	n := &a.net
 	n.mu.Lock()
-	changed := !maps.EqualFunc(n.v6, next, slices.Equal[[]string])
+	prev := n.v6
+	changed := !maps.EqualFunc(prev, next, slices.Equal[[]string])
 	n.v6 = next
 	n.mu.Unlock()
 	if !changed {
 		return
+	}
+	// Адреса устройства с маршрутом или в правиле попадают и в правила ядра,
+	// поэтому им нужен тот же путь, что и новым IPv4 (перехват + применение).
+	// У остальных устройств IPv6 меняется часто (временные адреса), а ядру
+	// они не нужны — хватает обновления перехвата.
+	for _, d := range cfg.Devices {
+		if usedInRouting(cfg, d) && !slices.Equal(prev[d.ID], next[d.ID]) {
+			a.routingIPsChanged()
+			return
+		}
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
