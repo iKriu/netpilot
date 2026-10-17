@@ -38,8 +38,12 @@ func (openwrtBackend) Apply(cfg model.Router, _ []Lease) error {
 	if !cfg.Enabled {
 		return nil // OpenWrt остаётся роутером со своими настройками
 	}
+	script, err := uciRouter(cfg)
+	if err != nil {
+		return err
+	}
 	cmd := exec.Command("uci", "batch")
-	cmd.Stdin = strings.NewReader(uciRouter(cfg))
+	cmd.Stdin = strings.NewReader(script)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("uci: %v: %s", err, out)
 	}
@@ -126,10 +130,19 @@ func parseIfstatus(data []byte) WANStatus {
 	return st
 }
 
-// uciRouter — команды «uci batch» для wan/lan и DHCP.
-func uciRouter(r model.Router) string {
+// uciRouter — команды «uci batch» для wan/lan и DHCP. Перевод строки в
+// значении начал бы новую команду uci, поэтому такие значения — ошибка.
+func uciRouter(r model.Router) (string, error) {
 	var b strings.Builder
-	set := func(k, v string) { fmt.Fprintf(&b, "set %s=%s\n", k, uciQuote(v)) }
+	var qerr error
+	q := func(k, v string) string {
+		s, err := uciQuote(v)
+		if err != nil && qerr == nil {
+			qerr = fmt.Errorf("%s: %w", k, err)
+		}
+		return s
+	}
+	set := func(k, v string) { fmt.Fprintf(&b, "set %s=%s\n", k, q(k, v)) }
 	// delete несуществующего параметра — не ошибка для uci batch, но пишет
 	// предупреждение; поэтому сначала задаём пустое значение, затем удаляем.
 	del := func(k string) { fmt.Fprintf(&b, "set %s=''\ndelete %s\n", k, k) }
@@ -160,7 +173,7 @@ func uciRouter(r model.Router) string {
 	del("network.wan.dns")
 	if len(w.DNS) > 0 {
 		for _, d := range w.DNS {
-			fmt.Fprintf(&b, "add_list network.wan.dns=%s\n", uciQuote(strings.TrimSpace(d)))
+			fmt.Fprintf(&b, "add_list network.wan.dns=%s\n", q("network.wan.dns", strings.TrimSpace(d)))
 		}
 		set("network.wan.peerdns", "0")
 	} else {
@@ -197,8 +210,11 @@ func uciRouter(r model.Router) string {
 			set("dhcp.lan.ignore", "1")
 		}
 	}
+	if qerr != nil {
+		return "", qerr
+	}
 	b.WriteString("commit network\ncommit dhcp\n")
-	return b.String()
+	return b.String(), nil
 }
 
 func offset(from, to netip.Addr) int {
@@ -208,5 +224,11 @@ func offset(from, to netip.Addr) int {
 	return y - x
 }
 
-// uciQuote — значение в одинарных кавычках для uci batch.
-func uciQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+// uciQuote — значение в одинарных кавычках для uci batch. Управляющие
+// символы отвергаются, а не вырезаются: иначе сохранился бы не тот пароль.
+func uciQuote(s string) (string, error) {
+	if hasControl(s) {
+		return "", errControl
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'", nil
+}

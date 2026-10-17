@@ -14,8 +14,11 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"netpilot/internal/model"
 )
@@ -86,8 +89,29 @@ func Validate(r model.Router, ifaces []Iface) error {
 		names[i.Name] = true
 	}
 	w, l := r.WAN, r.LAN
+	// Значения попадают в файлы настроек (опции pppd, uci batch, resolv.conf),
+	// где перевод строки начинает новую команду. Приходят они и из резервной
+	// копии, поэтому проверяем все поля, а не только видимые в интерфейсе.
+	fields := []struct{ name, v string }{
+		{"порт провайдера", w.Interface}, {"тип подключения", w.Proto},
+		{"логин PPPoE", w.Username}, {"пароль PPPoE", w.Password}, {"имя сервиса PPPoE", w.Service},
+		{"адрес провайдера", w.Address}, {"шлюз провайдера", w.Gateway}, {"MAC-адрес", w.MAC},
+		{"порт локальной сети", l.Interface}, {"адрес локальной сети", l.Address},
+		{"начало диапазона DHCP", l.RangeStart}, {"конец диапазона DHCP", l.RangeEnd},
+	}
+	for _, d := range w.DNS {
+		fields = append(fields, struct{ name, v string }{"DNS-сервер", d})
+	}
+	for _, f := range fields {
+		if hasControl(f.v) {
+			return fmt.Errorf("%s: %w", f.name, errControl)
+		}
+	}
 	if w.Interface == "" {
 		return errors.New("выберите порт, в который включён кабель провайдера")
+	}
+	if !validIface(w.Interface) {
+		return fmt.Errorf("недопустимое имя порта %q", w.Interface)
 	}
 	if len(ifaces) > 0 && !names[w.Interface] {
 		return fmt.Errorf("порт %s не найден", w.Interface)
@@ -127,6 +151,9 @@ func Validate(r model.Router, ifaces []Iface) error {
 	if l.Interface == "" {
 		return errors.New("выберите порт локальной сети")
 	}
+	if !validIface(l.Interface) {
+		return fmt.Errorf("недопустимое имя порта %q", l.Interface)
+	}
 	if l.Interface == w.Interface {
 		return errors.New("порт провайдера и порт локальной сети должны быть разными")
 	}
@@ -155,6 +182,24 @@ func Validate(r model.Router, ifaces []Iface) error {
 	}
 	return nil
 }
+
+var errControl = errors.New("недопустимые символы (перевод строки или другие управляющие)")
+
+// hasControl — есть ли управляющие символы: \r, \n, NUL, табуляция и т.п.
+func hasControl(s string) bool {
+	for _, r := range s {
+		if unicode.IsControl(r) || r == utf8.RuneError || r == 0x2028 || r == 0x2029 { // RuneError — битый UTF-8; 0x2028/9 — разделители строк Unicode
+			return true
+		}
+	}
+	return false
+}
+
+// ifaceName — имя сетевого интерфейса Linux (IFNAMSIZ: до 15 символов).
+// Дефис в начале не разрешаем: имя идёт аргументом ip, udhcpc и pppd.
+var ifaceName = regexp.MustCompile(`^[A-Za-z0-9._@:][A-Za-z0-9._@:-]{0,14}$`)
+
+func validIface(s string) bool { return ifaceName.MatchString(s) && s != "." && s != ".." }
 
 // explainPPP переводит строки журнала pppd в понятное объяснение.
 func explainPPP(log string) string {

@@ -5,6 +5,9 @@ package dhcp
 
 import (
 	"fmt"
+	"log"
+	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"regexp"
@@ -47,7 +50,10 @@ func (OpenWrt) Sync(devices []model.Device) error {
 	if err != nil && len(out) == 0 {
 		return fmt.Errorf("uci show dhcp: %w", err)
 	}
-	script := uciScript(ownSections(string(out)), devices)
+	script, skipped := uciScript(ownSections(string(out)), devices)
+	if len(skipped) > 0 {
+		log.Printf("закрепление адресов: пропущены устройства с неверным MAC или IPv4: %s", strings.Join(skipped, ", "))
+	}
 	cmd := exec.Command("uci", "batch")
 	cmd.Stdin = strings.NewReader(script)
 	if msg, err := cmd.CombinedOutput(); err != nil {
@@ -71,7 +77,11 @@ func ownSections(uciShow string) []string {
 
 // uciScript пересоздаёт свои записи: так удалённые и открепленные устройства
 // исчезают из DHCP без отдельной логики.
-func uciScript(existing []string, devices []model.Device) string {
+//
+// MAC и IP пишутся только разобранными и в каноническом виде: перевод строки
+// в сохранённом значении (например, из резервной копии) начал бы новую
+// команду uci. Неразборчивые устройства пропускаются и возвращаются в skipped.
+func uciScript(existing []string, devices []model.Device) (script string, skipped []string) {
 	var b strings.Builder
 	for _, s := range existing {
 		fmt.Fprintf(&b, "delete dhcp.%s\n", s)
@@ -80,14 +90,20 @@ func uciScript(existing []string, devices []model.Device) string {
 		if !d.Pinned || d.MAC == "" || d.IP == "" || !safeID.MatchString(d.ID) {
 			continue
 		}
+		hw, err := net.ParseMAC(d.MAC)
+		ip, err2 := netip.ParseAddr(d.IP)
+		if err != nil || len(hw) != 6 || err2 != nil || !ip.Is4() {
+			skipped = append(skipped, d.ID)
+			continue
+		}
 		sec := "np_" + d.ID
 		fmt.Fprintf(&b, "set dhcp.%s=host\n", sec)
 		fmt.Fprintf(&b, "set dhcp.%s.name='%s'\n", sec, hostname(d))
-		fmt.Fprintf(&b, "set dhcp.%s.mac='%s'\n", sec, quote(d.MAC))
-		fmt.Fprintf(&b, "set dhcp.%s.ip='%s'\n", sec, quote(d.IP))
+		fmt.Fprintf(&b, "set dhcp.%s.mac='%s'\n", sec, hw)
+		fmt.Fprintf(&b, "set dhcp.%s.ip='%s'\n", sec, ip)
 	}
 	b.WriteString("commit dhcp\n")
-	return b.String()
+	return b.String(), skipped
 }
 
 var (
@@ -110,5 +126,3 @@ func hostname(d model.Device) string {
 	}
 	return n
 }
-
-func quote(s string) string { return strings.ReplaceAll(s, "'", "") }

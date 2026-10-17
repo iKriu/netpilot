@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/netip"
 	"os"
@@ -27,14 +28,16 @@ const pppDev = "ppp-wan"
 type linuxBackend struct {
 	dir string
 
-	mu       sync.Mutex
-	cfg      model.Router
-	on       bool
-	wan      external.Process
-	dns      external.Process
-	lanAdded string // адрес, который мы добавили на LAN-порт (его и уберём)
-	wanAdded string // статический адрес на WAN-порту
-	upSince  time.Time
+	mu      sync.Mutex
+	cfg     model.Router
+	on      bool
+	wan     external.Process
+	dns     external.Process
+	net     netState // что действительно сделано с портами (его и откатываем)
+	helpers []helper // процессы с аргументами — для перезапуска присмотром
+	stopSup context.CancelFunc
+	supDone chan struct{}
+	upSince time.Time
 }
 
 func newLinux(dataDir string) *linuxBackend {
@@ -68,13 +71,24 @@ func (b *linuxBackend) Check() Support {
 	return s
 }
 
-func (b *linuxBackend) Apply(cfg model.Router, leases []Lease) error {
+func (b *linuxBackend) Apply(cfg model.Router, leases []Lease) (err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.teardownLocked(cfg.LAN.Address)
+	keep := model.LAN{}
+	if cfg.Enabled {
+		keep = cfg.LAN
+	}
+	b.teardownLocked(keep)
 	if !cfg.Enabled {
 		return nil
 	}
+	// Сбой посреди применения: сразу убираем сделанное по записям в b.net,
+	// чтобы не остались полуживые udhcpc/pppd, NAT и адреса.
+	defer func() {
+		if err != nil {
+			b.teardownLocked(model.LAN{})
+		}
+	}()
 	if err := os.MkdirAll(b.dir, 0o700); err != nil {
 		return err
 	}
@@ -86,10 +100,10 @@ func (b *linuxBackend) Apply(cfg model.Router, leases []Lease) error {
 		return err
 	}
 	if err := run("ip", "addr", "add", l.Address, "dev", l.Interface); err == nil {
-		b.lanAdded = l.Address
+		b.net.LANAddr, b.net.LANDev = l.Address, l.Interface
 	} else if !strings.Contains(err.Error(), "File exists") && !strings.Contains(err.Error(), "already assigned") {
 		return fmt.Errorf("адрес локальной сети: %w", err)
-	}
+	} // уже есть: либо оставлен с прошлого раза (запись сохранена), либо чужой — не трогаем
 
 	// Порт провайдера.
 	if w.MAC != "" {
@@ -121,12 +135,15 @@ func (b *linuxBackend) Apply(cfg model.Router, leases []Lease) error {
 	}
 
 	wanLog := filepath.Join(b.dir, "wan.log")
+	var helpers []helper
 	switch w.Proto {
 	case "static":
+		// Порт провайдера целиком отдан роутеру: адрес снимаем при выключении,
+		// даже если он уже стоял (например, остался после аварийного завершения).
 		if err := run("ip", "addr", "add", w.Address, "dev", w.Interface); err != nil && !strings.Contains(err.Error(), "File exists") {
 			return fmt.Errorf("адрес провайдера: %w", err)
 		}
-		b.wanAdded = w.Address
+		b.net.WANAddr, b.net.WANDev = w.Address, w.Interface
 		if err := run("ip", "route", "replace", "default", "via", w.Gateway, "dev", w.Interface); err != nil {
 			return fmt.Errorf("маршрут по умолчанию: %w", err)
 		}
@@ -136,10 +153,16 @@ func (b *linuxBackend) Apply(cfg model.Router, leases []Lease) error {
 			return err
 		}
 		_ = os.Remove(filepath.Join(b.dir, "wan.state"))
+		// Скрипт udhcpc может поставить адрес, даже если сам udhcpc тут же
+		// упадёт, — поэтому порт записываем до запуска.
+		b.net.WANFlush = w.Interface
 		// -t 0: пытаться получить адрес бесконечно (кабель могут подключить позже).
-		if err := b.wan.Start("udhcpc", []string{"-i", w.Interface, "-f", "-S", "-t", "0", "-T", "3", "-A", "5", "-s", script, "-x", "hostname:netpilot"}, b.dir, wanLog); err != nil {
+		h := helper{name: "DHCP-клиент (udhcpc)", p: &b.wan, bin: "udhcpc", dir: b.dir, log: wanLog,
+			args: []string{"-i", w.Interface, "-f", "-S", "-t", "0", "-T", "3", "-A", "5", "-s", script, "-x", "hostname:netpilot"}}
+		if err := h.p.Start(h.bin, h.args, h.dir, h.log); err != nil {
 			return fmt.Errorf("DHCP-клиент: %w", err)
 		}
+		helpers = append(helpers, h)
 	case "pppoe":
 		opts := filepath.Join(b.dir, "ppp.options")
 		text, err := pppOptions(w)
@@ -150,9 +173,12 @@ func (b *linuxBackend) Apply(cfg model.Router, leases []Lease) error {
 		if err := os.WriteFile(opts, []byte(text), 0o600); err != nil {
 			return err
 		}
-		if err := b.wan.Start("pppd", []string{"file", opts}, b.dir, wanLog); err != nil {
+		// pppd с persist переподключается сам; присмотр нужен, только если он вышел совсем.
+		h := helper{name: "PPPoE (pppd)", p: &b.wan, bin: "pppd", args: []string{"file", opts}, dir: b.dir, log: wanLog}
+		if err := h.p.Start(h.bin, h.args, h.dir, h.log); err != nil {
 			return fmt.Errorf("PPPoE: %w", err)
 		}
+		helpers = append(helpers, h)
 	}
 
 	wanDevs := []string{w.Interface}
@@ -166,43 +192,50 @@ func (b *linuxBackend) Apply(cfg model.Router, leases []Lease) error {
 	if err := writeHosts(filepath.Join(b.dir, "dhcp-hosts"), leases); err != nil {
 		return err
 	}
-	if err := b.dns.Start("dnsmasq", dnsmasqArgs(l, b.dir, resolv), b.dir, filepath.Join(b.dir, "dnsmasq.log")); err != nil {
+	dns := helper{name: "dnsmasq", p: &b.dns, bin: "dnsmasq", args: dnsmasqArgs(l, b.dir, resolv), dir: b.dir, log: filepath.Join(b.dir, "dnsmasq.log")}
+	if err := dns.p.Start(dns.bin, dns.args, dns.dir, dns.log); err != nil {
 		return fmt.Errorf("dnsmasq: %w", err)
 	}
-	b.cfg, b.on, b.upSince = cfg, true, time.Time{}
+	helpers = append(helpers, dns)
+
+	b.cfg, b.on, b.upSince, b.helpers = cfg, true, time.Time{}, helpers
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	b.stopSup, b.supDone = cancel, done
+	go func() {
+		defer close(done)
+		supervise(ctx, helpers, defaultSupervise)
+	}()
 	return nil
 }
 
 func (b *linuxBackend) Disable() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.teardownLocked("")
+	b.teardownLocked(model.LAN{})
 	return nil
 }
 
-// teardownLocked убирает всё, что настроили: процессы, NAT, добавленные адреса.
-// keepLAN — адрес, который останется и в новой конфигурации (его не трогаем).
-func (b *linuxBackend) teardownLocked(keepLAN string) {
+// teardownLocked убирает всё, что настроили: присмотр, процессы, NAT и
+// адреса — по записям b.net, а не по конфигурации (при сбое Apply она старая).
+// keep — локальная сеть новой конфигурации (см. undoPlan).
+func (b *linuxBackend) teardownLocked(keep model.LAN) {
+	// Сначала останавливаем присмотр и ждём его: иначе он может перезапустить
+	// процесс, который мы сейчас остановим, или столкнуться с новым Apply.
+	if b.stopSup != nil {
+		b.stopSup()
+		<-b.supDone
+		b.stopSup, b.supDone = nil, nil
+	}
 	_ = b.wan.Stop()
 	_ = b.dns.Stop()
 	_ = run("nft", "delete", "table", "ip", natTable)
 	_ = run("nft", "delete", "table", "inet", filterTable)
-	if b.on {
-		w := b.cfg.WAN
-		switch w.Proto {
-		case "static":
-			if b.wanAdded != "" {
-				_ = run("ip", "addr", "del", b.wanAdded, "dev", w.Interface)
-			}
-		case "dhcp":
-			_ = run("ip", "-4", "addr", "flush", "dev", w.Interface)
-		}
+	cmds, left := undoPlan(b.net, keep)
+	for _, c := range cmds {
+		_ = run(c[0], c[1:]...)
 	}
-	if b.lanAdded != "" && b.lanAdded != keepLAN {
-		_ = run("ip", "addr", "del", b.lanAdded, "dev", b.cfg.LAN.Interface)
-		b.lanAdded = ""
-	}
-	b.on, b.wanAdded = false, ""
+	b.net, b.on, b.helpers = left, false, nil
 }
 
 func (b *linuxBackend) Reconnect() error {
@@ -301,10 +334,24 @@ func pppOptions(w model.WAN) (string, error) {
 	if plugin == "" {
 		return "", errors.New("не найден модуль PPPoE для pppd")
 	}
-	return pppOptionsFor(plugin, w), nil
+	return pppOptionsFor(plugin, w)
 }
 
-func pppOptionsFor(plugin string, w model.WAN) string {
+// pppOptionsFor — файл опций pppd. Каждое значение — одна строка файла:
+// перевод строки в пароле дописал бы свои опции (plugin, connect), которые
+// pppd выполнит от root, поэтому такие значения не принимаем.
+func pppOptionsFor(plugin string, w model.WAN) (string, error) {
+	if !validIface(w.Interface) {
+		return "", fmt.Errorf("недопустимое имя порта провайдера %q", w.Interface)
+	}
+	var qerr error
+	q := func(what, s string) string {
+		v, err := pppQuote(s)
+		if err != nil && qerr == nil {
+			qerr = fmt.Errorf("%s PPPoE: %w", what, err)
+		}
+		return v
+	}
 	mtu := w.MTU
 	if mtu == 0 {
 		mtu = 1492
@@ -315,16 +362,19 @@ func pppOptionsFor(plugin string, w model.WAN) string {
 	if strings.HasSuffix(plugin, "rp-pppoe.so") {
 		line("%s", w.Interface) // pppd 2.4
 		if w.Service != "" {
-			line("rp_pppoe_service %s", pppQuote(w.Service))
+			line("rp_pppoe_service %s", q("имя сервиса", w.Service))
 		}
 	} else {
 		line("nic-%s", w.Interface) // pppd 2.5
 		if w.Service != "" {
-			line("pppoe-service %s", pppQuote(w.Service))
+			line("pppoe-service %s", q("имя сервиса", w.Service))
 		}
 	}
-	line("user %s", pppQuote(w.Username))
-	line("password %s", pppQuote(w.Password))
+	line("user %s", q("логин", w.Username))
+	line("password %s", q("пароль", w.Password))
+	if qerr != nil {
+		return "", qerr
+	}
 	line("ifname %s", pppDev)
 	for _, o := range []string{
 		"noauth", "defaultroute", "replacedefaultroute", "noipdefault", "hide-password",
@@ -339,14 +389,19 @@ func pppOptionsFor(plugin string, w model.WAN) string {
 	}
 	line("mtu %d", mtu)
 	line("mru %d", mtu)
-	return b.String()
+	return b.String(), nil
 }
 
-// pppQuote — строка в кавычках для файла опций pppd.
-func pppQuote(s string) string {
+// pppQuote — строка в кавычках для файла опций pppd. Управляющие символы
+// (перевод строки, NUL) не экранируются, а отвергаются: тихо вырезать их
+// значило бы отправить провайдеру не тот пароль.
+func pppQuote(s string) (string, error) {
+	if hasControl(s) {
+		return "", errControl
+	}
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `"`, `\"`)
-	return `"` + s + `"`
+	return `"` + s + `"`, nil
 }
 
 // pppAddrs — адрес и шлюз PPP: "inet 10.200.0.10 peer 10.200.0.1/32".
@@ -436,19 +491,47 @@ func dnsmasqArgs(l model.LAN, dir, resolv string) []string {
 }
 
 func writeHosts(path string, leases []Lease) error {
+	text, skipped := hostsFile(leases)
+	if skipped > 0 {
+		log.Printf("режим роутера: пропущено закреплений с неверным MAC или IPv4: %d", skipped)
+	}
+	return os.WriteFile(path, []byte(text), 0o644)
+}
+
+// hostsFile — содержимое dhcp-hostsfile для dnsmasq. Берём только разобранные
+// MAC и IPv4 и пишем их в каноническом виде: строка из сохранённых данных
+// (в том числе из резервной копии) не должна дописать в файл свои строки.
+func hostsFile(leases []Lease) (text string, skipped int) {
 	var b strings.Builder
 	for _, l := range leases {
 		if l.MAC == "" || l.IP == "" {
 			continue
 		}
-		name := hostName(l.Name)
-		if name != "" {
-			fmt.Fprintf(&b, "%s,%s,%s\n", l.MAC, l.IP, name)
+		mac, ip, ok := parseLease(l.MAC, l.IP)
+		if !ok {
+			skipped++
+			continue
+		}
+		if name := hostName(l.Name); name != "" {
+			fmt.Fprintf(&b, "%s,%s,%s\n", mac, ip, name)
 		} else {
-			fmt.Fprintf(&b, "%s,%s\n", l.MAC, l.IP)
+			fmt.Fprintf(&b, "%s,%s\n", mac, ip)
 		}
 	}
-	return os.WriteFile(path, []byte(b.String()), 0o644)
+	return b.String(), skipped
+}
+
+// parseLease проверяет MAC (6 байт) и IPv4 закрепления.
+func parseLease(mac, ip string) (string, string, bool) {
+	hw, err := net.ParseMAC(mac)
+	if err != nil || len(hw) != 6 {
+		return "", "", false
+	}
+	a, err := netip.ParseAddr(ip)
+	if err != nil || !a.Is4() {
+		return "", "", false
+	}
+	return hw.String(), a.String(), true
 }
 
 func readHosts(path string) []Lease {

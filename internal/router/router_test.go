@@ -73,7 +73,10 @@ func TestNATRuleset(t *testing.T) {
 
 func TestPPPOptions(t *testing.T) {
 	w := model.WAN{Interface: "eth1", Username: `user"x`, Password: `p\a"ss`, Service: "inet"}
-	o := pppOptionsFor("/usr/lib/pppd/2.5.1/pppoe.so", w)
+	o, err := pppOptionsFor("/usr/lib/pppd/2.5.1/pppoe.so", w)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, want := range []string{
 		"plugin /usr/lib/pppd/2.5.1/pppoe.so", "nic-eth1", `pppoe-service "inet"`,
 		`user "user\"x"`, `password "p\\a\"ss"`, "ifname ppp-wan", "persist", "maxfail 0",
@@ -83,7 +86,7 @@ func TestPPPOptions(t *testing.T) {
 			t.Errorf("нет %q:\n%s", want, o)
 		}
 	}
-	old := pppOptionsFor("/usr/lib/pppd/2.4.9/rp-pppoe.so", model.WAN{Interface: "eth1", DNS: []string{"1.1.1.1"}, MTU: 1480})
+	old, _ := pppOptionsFor("/usr/lib/pppd/2.4.9/rp-pppoe.so", model.WAN{Interface: "eth1", DNS: []string{"1.1.1.1"}, MTU: 1480})
 	if !strings.Contains(old, "\neth1\n") || strings.Contains(old, "usepeerdns") || !strings.Contains(old, "mtu 1480") {
 		t.Errorf("pppd 2.4 / свои DNS / MTU:\n%s", old)
 	}
@@ -93,7 +96,10 @@ func TestUCI(t *testing.T) {
 	r := good()
 	r.WAN.Password = "it's"
 	r.WAN.DNS = []string{"1.1.1.1"}
-	s := uciRouter(r)
+	s, err := uciRouter(r)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, want := range []string{
 		"set network.wan.proto='pppoe'", "set network.wan.device='eth1'",
 		`set network.wan.password='it'\''s'`, "add_list network.wan.dns='1.1.1.1'", "set network.wan.peerdns='0'",
