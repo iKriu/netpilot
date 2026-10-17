@@ -64,7 +64,9 @@ func (s *stats) today(now time.Time) *DayStats {
 	return d
 }
 
-// recordTraffic учитывает прирост трафика одного соединения.
+// recordTraffic учитывает прирост трафика одного соединения (или остатка
+// закрытых соединений). src == "" — источник неизвестен: байты входят в итоги
+// дня и в разбивку «через прокси / напрямую», но ни одному устройству.
 func (a *App) recordTraffic(now time.Time, src string, proxied bool, up, down int64) {
 	if up == 0 && down == 0 {
 		return
@@ -83,11 +85,13 @@ func (a *App) recordTraffic(now time.Time, src string, proxied bool, up, down in
 		d.DirectUp += up
 		d.DirectDown += down
 	}
-	if d.Devices == nil {
-		d.Devices = map[string][2]int64{}
+	if src != "" {
+		if d.Devices == nil {
+			d.Devices = map[string][2]int64{}
+		}
+		v := d.Devices[src]
+		d.Devices[src] = [2]int64{v[0] + up, v[1] + down}
 	}
-	v := d.Devices[src]
-	d.Devices[src] = [2]int64{v[0] + up, v[1] + down}
 	s.dirty = true
 }
 

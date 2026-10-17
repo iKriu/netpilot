@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"log"
+	"net/netip"
 	"runtime"
 
 	"netpilot/internal/firewall"
@@ -36,8 +37,15 @@ func (a *App) firewallSpec(cfg *model.Config) firewall.Spec {
 	}
 	for _, d := range cfg.Devices {
 		// IPv4 из настроек и IPv6 из таблицы соседей: маршрут действует на оба.
-		addrs := append([]string(nil), a.deviceIPv6(d.ID)...)
-		if d.IP != "" {
+		// Неверный адрес (ручная правка конфига) сломал бы nft-набор целиком
+		// и с ним перехват для всех — такие пропускаем.
+		var addrs []string
+		for _, ip := range a.deviceIPv6(d.ID) {
+			if validAddr(ip) {
+				addrs = append(addrs, ip)
+			}
+		}
+		if validAddr(d.IP) {
 			addrs = append(addrs, d.IP)
 		}
 		switch d.Route {
@@ -50,6 +58,12 @@ func (a *App) firewallSpec(cfg *model.Config) firewall.Spec {
 		}
 	}
 	return spec
+}
+
+// validAddr — непустой корректный IP-адрес (без зоны: nftables её не примет).
+func validAddr(s string) bool {
+	ip, err := netip.ParseAddr(s)
+	return err == nil && ip.Zone() == ""
 }
 
 // applyFirewallLocked включает или обновляет перехват по текущей конфигурации.

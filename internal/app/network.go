@@ -3,9 +3,11 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"maps"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -152,9 +154,10 @@ func (a *App) merge(hosts []scan.Host) (ScanReport, error) {
 	now := time.Now()
 	seen := map[string]string{}
 	var ipChanged bool
+	var warnings []string
 
 	err := a.Store.Update(func(c *model.Config) error {
-		rep.Added, rep.Updated, ipChanged = 0, 0, false
+		rep.Added, rep.Updated, rep.Removed, ipChanged, warnings = 0, 0, 0, false, nil
 		clear(seen)
 		byMAC := map[string]int{}
 		byIP := map[string]int{}
@@ -203,9 +206,39 @@ func (a *App) merge(hosts []scan.Host) (ScanReport, error) {
 					rep.Updated++
 				}
 			}
+			// Адрес мог остаться за другим устройством, которое ушло из сети, а DHCP
+			// отдал его этому. Маршруты и правила работают по IP: устаревший адрес
+			// направил бы чужой трафик по чужим настройкам (гость без интернета,
+			// посторонний мимо прокси) — снимаем его. Закреплённый адрес не трогаем.
+			pinnedBy := -1
+			for j := range c.Devices {
+				o := &c.Devices[j]
+				// Устройство, добавленное вручную без MAC, задано самим адресом:
+				// сняв его, мы бы потеряли устройство.
+				if j == i || o.IP != h.IP || o.MAC == "" {
+					continue
+				}
+				if o.Pinned {
+					pinnedBy = j
+					continue
+				}
+				o.IP = ""
+				rep.Updated++
+				if usedInRouting(c, *o) {
+					ipChanged = true
+				}
+			}
+			want := h.IP
+			if pinnedBy >= 0 {
+				// Адрес закреплён за другим устройством: новичку его не присваиваем,
+				// чтобы его настройки не легли на чужой адрес.
+				want = ""
+				p := c.Devices[pinnedBy]
+				warnings = append(warnings, fmt.Sprintf("Адрес %s закреплён за «%s», но его занимает другое устройство (%s). Пока это так, к нему применяются настройки «%s» — проверьте закрепление адреса в DHCP.", h.IP, p.Name, h.MAC, p.Name))
+			}
 			// Незакреплённое устройство следует за своим адресом: правила продолжают работать.
-			if !d.Pinned && d.IP != h.IP {
-				d.IP = h.IP
+			if !d.Pinned && d.IP != want {
+				d.IP = want
 				rep.Updated++
 				if usedInRouting(c, *d) {
 					ipChanged = true
@@ -272,15 +305,45 @@ func (a *App) merge(hosts []scan.Host) (ScanReport, error) {
 	for id, ip := range seen {
 		n.seen[id], n.seenIP[id] = now, ip
 	}
+	for _, w := range warnings {
+		if !slices.Contains(n.warnings, w) {
+			n.warnings = append(slices.Clip(n.warnings), w) // срез мог уйти в Network()
+		}
+	}
 	n.lastScan = now
 	n.mu.Unlock()
 
 	// Новый IP у устройства с маршрутом или в правиле нужно донести до ядра.
 	// Остальные изменения на маршрутизацию не влияют.
 	if ipChanged {
-		a.Changed()
+		a.routingIPsChanged()
 	}
 	return rep, nil
+}
+
+// routingIPsChanged доносит сменившиеся адреса устройств до перехвата и ядра.
+// Это изменение сделал сканер, а не человек: если ждать «Применить», наборы
+// nftables и правила ядра продолжат направлять по старым адресам чужие
+// устройства. Поэтому перехват обновляется сразу, а изменение отмечается как
+// автоматическое (subsChanged), чтобы не отключать автоприменение подписок.
+// Конфигурацию ядра применяем сами, только если других неприменённых правок
+// нет, и только на Linux: там sing-box перезагружается без разрыва соединений,
+// а на Windows перезапуск оборвал бы их — там изменение ждёт пользователя.
+func (a *App) routingIPsChanged() {
+	a.subsChanged()
+	a.mu.Lock()
+	if a.fwOn {
+		if err := a.applyFirewallLocked(); err != nil {
+			log.Printf("обновление перехвата: %v", err)
+		}
+	}
+	running, onlyAuto := a.active != nil, a.dirty && a.dirtyBySubs
+	a.mu.Unlock()
+	if running && onlyAuto && runtime.GOOS == "linux" {
+		if err := a.Apply(); err != nil {
+			log.Printf("применение новых адресов устройств: %v", err)
+		}
+	}
 }
 
 var errNoChanges = errors.New("без изменений")
@@ -425,7 +488,9 @@ func (a *App) DevicesChanged() {
 // WatchNetwork раз в минуту читает таблицу ARP (без опроса сети):
 // так отметка «в сети» и адреса остаются свежими.
 func (a *App) WatchNetwork(ctx context.Context) {
-	go scan.ListenDHCP(ctx) // имена устройств из их DHCP-запросов
+	// Имена устройств из их DHCP-запросов. В режиме роутера порт 67 нужен
+	// нашему dnsmasq, а имена берутся из его аренд.
+	go scan.ListenDHCP(ctx, func() bool { return !a.routerEnabled() })
 	if _, err := a.ScanNetwork(ctx, true); err != nil {
 		log.Printf("сканирование сети: %v", err)
 	}

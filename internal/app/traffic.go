@@ -49,6 +49,9 @@ type DeviceTraffic struct {
 type traffic struct {
 	mu       sync.Mutex
 	last     map[string][2]int64 // id соединения → последние up/down
+	meta     map[string]connMeta // id живого соединения → чьё оно и сколько дало за прошлый опрос
+	total    [2]int64            // последние uploadTotal/downloadTotal ядра
+	carry    [2]int64            // перебор: соединения насчитали больше, чем общий счётчик
 	bySrc    map[string]*DeviceTraffic
 	byOut    map[string]*DeviceTraffic // тег узла/выхода → трафик
 	lastOut  map[string][2]int64       // Xray: последние накопленные значения по выходам
@@ -78,6 +81,23 @@ type clashConn struct {
 	Chains   []string  `json:"chains"`
 	Rule     string    `json:"rule"`
 	Payload  string    `json:"rulePayload"`
+}
+
+// connMeta — что известно о соединении, чтобы учесть его остаток после закрытия.
+type connMeta struct {
+	src     string
+	proxied bool
+	out     string
+	up      int64 // прирост за прошлый опрос
+	down    int64
+}
+
+// clashConnections — ответ /connections. Общие счётчики есть у sing-box и
+// mihomo; указатели отличают «нет поля» от нуля.
+type clashConnections struct {
+	UploadTotal   *int64      `json:"uploadTotal"`
+	DownloadTotal *int64      `json:"downloadTotal"`
+	Connections   []clashConn `json:"connections"`
 }
 
 const trafficInterval = 2 * time.Second
@@ -137,17 +157,28 @@ func (a *App) pollTraffic(ctx context.Context) {
 		tr.mu.Unlock()
 		return
 	}
-	var body struct {
-		Connections []clashConn `json:"connections"`
-	}
+	var body clashConnections
 	if err := clashGet(ctx, api, "/connections", &body); err != nil {
 		tr.mu.Lock()
 		tr.err = err.Error()
 		tr.mu.Unlock()
 		return
 	}
+	a.applyConnections(time.Now(), body)
+}
 
-	now := time.Now()
+// applyConnections учитывает снимок /connections.
+//
+// Приросты живых соединений между опросами не видят байтов соединений,
+// закрывшихся после прошлого опроса, и коротких (меньше trafficInterval).
+// Поэтому общий трафик берётся из счётчиков ядра uploadTotal/downloadTotal,
+// а разница с суммой по живым соединениям («остаток») распределяется по
+// соединениям, закрывшимся с прошлого опроса, пропорционально их последнему
+// приросту. Разбивка остатка по устройствам и выходам — оценка: последних
+// байтов закрытого соединения ядро уже не сообщает. Общие цифры и сумма
+// «через прокси + напрямую» в статистике при этом сходятся с ядром точно.
+func (a *App) applyConnections(now time.Time, body clashConnections) {
+	tr := &a.traffic
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	if tr.last == nil {
@@ -155,6 +186,9 @@ func (a *App) pollTraffic(ctx context.Context) {
 	}
 	if tr.byOut == nil {
 		tr.byOut = map[string]*DeviceTraffic{}
+	}
+	if tr.active == nil {
+		tr.active = map[string]time.Time{}
 	}
 	for _, o := range tr.byOut {
 		o.UpRate, o.DownRate, o.Conns = 0, 0, 0
@@ -166,7 +200,41 @@ func (a *App) pollTraffic(ctx context.Context) {
 	for _, d := range tr.bySrc {
 		d.UpRate, d.DownRate, d.Conns = 0, 0, 0
 	}
+	// add учитывает прирост у устройства, выхода и в статистике дня.
+	add := func(src string, proxied bool, out string, up, down int64, live bool) {
+		if src != "" || live {
+			d := tr.bySrc[src]
+			if d == nil {
+				d = &DeviceTraffic{}
+				tr.bySrc[src] = d
+			}
+			d.Up += up
+			d.Down += down
+			d.UpRate += float64(up) / elapsed
+			d.DownRate += float64(down) / elapsed
+			if live {
+				d.Conns++
+			}
+		}
+		if out != "" {
+			o := tr.byOut[out]
+			if o == nil {
+				o = &DeviceTraffic{}
+				tr.byOut[out] = o
+			}
+			o.Up += up
+			o.Down += down
+			o.UpRate += float64(up) / elapsed
+			o.DownRate += float64(down) / elapsed
+			if live {
+				o.Conns++
+			}
+		}
+		a.recordTraffic(now, src, proxied, up, down)
+	}
+
 	next := make(map[string][2]int64, len(body.Connections))
+	meta := make(map[string]connMeta, len(body.Connections))
 	conns := make([]Connection, 0, len(body.Connections))
 	var dUp, dDown int64
 	for _, c := range body.Connections {
@@ -174,37 +242,17 @@ func (a *App) pollTraffic(ctx context.Context) {
 		up, down := max(0, c.Upload-prev[0]), max(0, c.Download-prev[1])
 		next[c.ID] = [2]int64{c.Upload, c.Download}
 		src := c.Metadata.SourceIP
-		if tr.active == nil {
-			tr.active = map[string]time.Time{}
-		}
 		tr.active[src] = now
-		d := tr.bySrc[src]
-		if d == nil {
-			d = &DeviceTraffic{}
-			tr.bySrc[src] = d
-		}
-		d.Up += up
-		d.Down += down
 		// Через прокси — всё, что ушло не на прямой выход.
 		proxied := len(c.Chains) > 0 && c.Chains[0] != "direct" && c.Chains[0] != "DIRECT"
-		a.recordTraffic(now, src, proxied, up, down)
-		d.UpRate += float64(up) / elapsed
-		d.DownRate += float64(down) / elapsed
-		d.Conns++
+		out := ""
+		if len(c.Chains) > 0 {
+			out = c.Chains[0]
+		}
+		add(src, proxied, out, up, down, true)
+		meta[c.ID] = connMeta{src: src, proxied: proxied, out: out, up: up, down: down}
 		dUp += up
 		dDown += down
-		if len(c.Chains) > 0 {
-			o := tr.byOut[c.Chains[0]]
-			if o == nil {
-				o = &DeviceTraffic{}
-				tr.byOut[c.Chains[0]] = o
-			}
-			o.Up += up
-			o.Down += down
-			o.UpRate += float64(up) / elapsed
-			o.DownRate += float64(down) / elapsed
-			o.Conns++
-		}
 
 		dest := c.Metadata.DestinationIP
 		if dest != "" && c.Metadata.DestinationPort != "" {
@@ -220,11 +268,96 @@ func (a *App) pollTraffic(ctx context.Context) {
 			Up: c.Upload, Down: c.Download, Start: c.Start.Unix(), Rule: rule, Chains: c.Chains,
 		})
 	}
-	tr.last, tr.conns, tr.updated, tr.err = next, conns, now, ""
+	if body.UploadTotal != nil && body.DownloadTotal != nil {
+		totUp := counterDelta(tr.total[0], *body.UploadTotal)
+		totDown := counterDelta(tr.total[1], *body.DownloadTotal)
+		tr.total = [2]int64{*body.UploadTotal, *body.DownloadTotal}
+		// Счётчики соединений и общий читаются не одновременно: если соединения
+		// насчитали больше, перебор вычитается из следующих остатков.
+		var resUp, resDown int64
+		resUp, tr.carry[0] = residual(totUp - dUp + tr.carry[0])
+		resDown, tr.carry[1] = residual(totDown - dDown + tr.carry[1])
+		if resUp > 0 || resDown > 0 {
+			targets := closedConns(tr.meta, next)
+			if len(targets) == 0 {
+				// Соединения целиком прошли между опросами: скорее всего, от тех
+				// же устройств, что сейчас активны.
+				targets = closedConns(meta, nil)
+			}
+			if len(targets) == 0 {
+				targets = []connMeta{{proxied: true}} // чьё — неизвестно
+			}
+			ups := split(resUp, targets, func(m connMeta) int64 { return m.up })
+			downs := split(resDown, targets, func(m connMeta) int64 { return m.down })
+			for i, m := range targets {
+				if ups[i] > 0 || downs[i] > 0 {
+					add(m.src, m.proxied, m.out, ups[i], downs[i], false)
+				}
+			}
+			dUp += resUp
+			dDown += resDown
+		}
+	}
+	tr.last, tr.meta, tr.conns, tr.updated, tr.err = next, meta, conns, now, ""
 	tr.up += dUp
 	tr.down += dDown
 	tr.upRate, tr.downRate = float64(dUp)/elapsed, float64(dDown)/elapsed
 	a.recordPeak(now, tr.downRate)
+}
+
+// counterDelta — прирост накопленного счётчика. Ядро после перезапуска или
+// перезагрузки конфигурации начинает счёт заново: новое значение меньше
+// прежнего — значит, всё оно набежало с нуля.
+func counterDelta(prev, cur int64) int64 {
+	if cur < prev {
+		return max(cur, 0)
+	}
+	return cur - prev
+}
+
+// residual делит остаток на учитываемую часть и перебор, переносимый дальше.
+func residual(v int64) (count, carry int64) {
+	if v < 0 {
+		return 0, v
+	}
+	return v, 0
+}
+
+// closedConns — соединения из prev, которых нет в live (nil — все из prev),
+// в постоянном порядке, чтобы делёж был воспроизводимым.
+func closedConns(prev map[string]connMeta, live map[string][2]int64) []connMeta {
+	ids := make([]string, 0, len(prev))
+	for id := range prev {
+		if _, ok := live[id]; !ok {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	out := make([]connMeta, len(ids))
+	for i, id := range ids {
+		out[i] = prev[id]
+	}
+	return out
+}
+
+// split делит total пропорционально весам (вес+1, чтобы без прироста тоже
+// досталась доля); остаток от округления уходит последнему.
+func split(total int64, items []connMeta, weight func(connMeta) int64) []int64 {
+	out := make([]int64, len(items))
+	if total <= 0 || len(items) == 0 {
+		return out
+	}
+	var sum float64
+	for _, m := range items {
+		sum += float64(weight(m) + 1)
+	}
+	var given int64
+	for i, m := range items[:len(items)-1] {
+		out[i] = min(int64(float64(total)*float64(weight(m)+1)/sum), total-given)
+		given += out[i]
+	}
+	out[len(items)-1] = total - given
+	return out
 }
 
 // pollOutbounds — учёт по накопленным счётчикам выходов (Xray): общий трафик

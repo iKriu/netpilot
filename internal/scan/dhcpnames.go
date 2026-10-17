@@ -3,10 +3,12 @@ package scan
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"net"
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Имена из DHCP-запросов. Подключаясь к сети, устройство рассылает всем
@@ -14,24 +16,66 @@ import (
 // Адреса раздаёт роутер, но запрос широковещательный — его видит и NetPilot.
 var dhcpSeen sync.Map // MAC → имя
 
-// ListenDHCP слушает DHCP-запросы в сети, ничего не отвечая. Если порт 67
-// занят (NetPilot сам раздаёт адреса в режиме роутера), имена берутся из аренд.
-func ListenDHCP(ctx context.Context) {
-	if runtime.GOOS != "linux" {
+// dhcpCheckEvery — как часто проверять, можно ли сейчас слушать порт 67.
+const dhcpCheckEvery = 3 * time.Second
+
+// ListenDHCP слушает DHCP-запросы в сети, ничего не отвечая, пока allowed()
+// разрешает. Порт 67 нужен DHCP-серверу на этой же машине: на OpenWrt и в
+// режиме роутера адреса раздаёт dnsmasq, и имена берутся из его файла аренд
+// (ExtraLeaseFiles). Режим роутера включается на ходу, поэтому allowed()
+// проверяется периодически и сокет закрывается или открывается заново.
+func ListenDHCP(ctx context.Context, allowed func() bool) {
+	if runtime.GOOS != "linux" || fileExists("/etc/openwrt_release") {
 		return
 	}
-	pc, err := net.ListenPacket("udp4", "0.0.0.0:67")
-	if err != nil {
-		return
+	runDHCPListener(ctx, allowed, openDHCP, dhcpCheckEvery)
+}
+
+// runDHCPListener — цикл управления сокетом; open подменяется в тестах.
+func runDHCPListener(ctx context.Context, allowed func() bool, open func() (net.PacketConn, error), every time.Duration) {
+	var (
+		pc   net.PacketConn
+		done chan struct{}
+	)
+	closeConn := func() {
+		if pc != nil {
+			pc.Close()
+			<-done // чтение завершилось — порт свободен
+			pc = nil
+		}
 	}
-	go func() { <-ctx.Done(); pc.Close() }()
+	defer closeConn()
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		if allowed == nil || allowed() {
+			if pc == nil {
+				if c, err := open(); err == nil {
+					pc, done = c, make(chan struct{})
+					go readDHCP(c, done)
+				}
+			}
+		} else {
+			closeConn()
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+func readDHCP(pc net.PacketConn, done chan struct{}) {
+	defer close(done)
 	buf := make([]byte, 1500)
 	for {
 		n, _, err := pc.ReadFrom(buf)
 		if err != nil {
-			if ctx.Err() != nil {
+			if errors.Is(err, net.ErrClosed) {
 				return
 			}
+			time.Sleep(100 * time.Millisecond) // не крутиться впустую на повторяющейся ошибке
 			continue
 		}
 		if mac, name := parseDHCPRequest(buf[:n]); mac != "" && name != "" {
