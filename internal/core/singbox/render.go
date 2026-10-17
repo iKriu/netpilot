@@ -227,7 +227,10 @@ func render(cfg *model.Config, env core.Env, external bool) ([]byte, error) {
 		"experimental": experimental,
 	}
 	if external {
-		conf["log"] = M{"level": orDefault(s.LogLevel, "info"), "timestamp": true, "disable_color": true}
+		// Без disable_color: этого поля нет в sing-box 1.13, на котором собран
+		// Hiddify, и он отказывается запускаться с «unknown field». Цветовые
+		// коды из журнала убирает сам NetPilot (hiddify.logTail).
+		conf["log"] = M{"level": orDefault(s.LogLevel, "info"), "timestamp": true}
 	}
 	if !env.Compat113 {
 		conf["http_clients"] = []M{{"tag": httpDirect}} // без detour — прямое подключение
