@@ -1,0 +1,2 @@
+go test fuzz v1
+string("tuic://u:p@h.example.com:443?alpn=h3,%00#T")

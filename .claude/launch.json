@@ -1,0 +1,24 @@
+﻿{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "netpilot-ui",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "set NETPILOT_WEB_DIR=web\\static&& set NETPILOT_SCAN=0&& dist\\netpilot.exe -data C:\\Users\\Maximych\\AppData\\Local\\Temp\\claude\\C--Users-Maximych-Desktop-os\\cb4310bc-8009-47bc-9cd3-8ec721851196\\scratchpad\\uidata7 -listen 127.0.0.1:2018"],
+      "port": 2018
+    },
+    {
+      "name": "fake-github",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["C:\\Users\\Maximych\\AppData\\Local\\Temp\\claude\\C--Users-Maximych-Desktop-os\\cb4310bc-8009-47bc-9cd3-8ec721851196\\scratchpad\\upd\\fakegh.py"],
+      "port": 2099
+    },
+    {
+      "name": "netpilot-update-test",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "set NETPILOT_WEB_DIR=web\\static&& set NETPILOT_SCAN=0&& set NETPILOT_UPDATE_API=http://127.0.0.1:2099&& C:\\Users\\Maximych\\AppData\\Local\\Temp\\claude\\C--Users-Maximych-Desktop-os\\cb4310bc-8009-47bc-9cd3-8ec721851196\\scratchpad\\upd\\bin\\netpilot.exe -data C:\\Users\\Maximych\\AppData\\Local\\Temp\\claude\\C--Users-Maximych-Desktop-os\\cb4310bc-8009-47bc-9cd3-8ec721851196\\scratchpad\\uidata2 -listen 127.0.0.1:2018"],
+      "port": 2018
+    }
+  ]
+}
+

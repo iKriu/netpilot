@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# Новый пуш в ту же ветку отменяет устаревший прогон.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Те же теги, что в build.ps1 и Dockerfile: без них не собирается встроенный sing-box.
+  TAGS: with_quic,with_utls,with_clash_api
+
+jobs:
+  check:
+    name: vet, test, staticcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go vet (linux)
+        run: go vet -tags "$TAGS" ./...
+      # Часть кода под build-тегами windows: проверяем и её.
+      - name: go vet (windows)
+        run: GOOS=windows go vet -tags "$TAGS" ./...
+      # -race требует cgo; на ubuntu-latest gcc есть.
+      - name: go test -race
+        run: go test -race -tags "$TAGS" ./...
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 -tags "$TAGS" ./...
+
+  # Отдельной задачей: уязвимость в зависимости не должна скрывать результаты тестов.
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -tags "$TAGS" ./...
+
+  # Короткий прогон фаззеров парсера ссылок: подписки — недоверенный вход.
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: fuzz links
+        run: |
+          go test -tags "$TAGS" -run='^$' -fuzz='^FuzzParse$' -fuzztime=20s ./internal/links
+          go test -tags "$TAGS" -run='^$' -fuzz='^FuzzParseMany$' -fuzztime=20s ./internal/links
+
+  # Кросс-сборка под все платформы релиза: ловит код, собирающийся только на одной ОС.
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}${{ matrix.goarm && format('/v{0}', matrix.goarm) || '' }}${{ matrix.gomips && format('/{0}', matrix.gomips) || '' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: windows, goarch: amd64 }
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: linux, goarch: arm, goarm: "7" }
+          # Роутеры MIPS без FPU.
+          - { goos: linux, goarch: mipsle, gomips: softfloat }
+    env:
+      CGO_ENABLED: "0"
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      GOARM: ${{ matrix.goarm }}
+      GOMIPS: ${{ matrix.gomips }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go build
+        run: go build -trimpath -tags "$TAGS" -ldflags "-s -w" -o /dev/null ./cmd/netpilot

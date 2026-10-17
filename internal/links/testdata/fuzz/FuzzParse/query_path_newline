@@ -1,0 +1,2 @@
+go test fuzz v1
+string("vless://id@host:443?path=%0Aevil#x")

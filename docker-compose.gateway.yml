@@ -1,0 +1,28 @@
+# NetPilot как шлюз сети (прозрачный режим) — для Linux: ZimaOS, OpenWrt с Docker и т.п.
+#
+#   docker compose -f docker-compose.gateway.yml up -d --build
+#
+# Затем в интерфейсе: Настройки → Режим работы → «Прозрачный шлюз», включить автозапуск,
+# и указать IP этой машины как шлюз для устройств (в DHCP роутера или вручную).
+#
+# Контейнер работает в сети хоста: видит локальную сеть, находит устройства и
+# настраивает перехват трафика (nftables + TPROXY). Нужен доступ NET_ADMIN.
+services:
+  netpilot:
+    build: .
+    image: netpilot:latest
+    container_name: netpilot
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./data:/data
+    environment:
+      # Обязательно задайте пароль: интерфейс доступен всей локальной сети (логин admin).
+      # Если пусто, первую настройку с другого компьютера подтверждает одноразовый код
+      # из журнала контейнера:  docker compose -f docker-compose.gateway.yml logs netpilot
+      # Сеть хоста: прокси 7890 (без авторизации) слушает все интерфейсы машины —
+      # закройте его файрволом хоста от внешних сетей.
+      - NETPILOT_PASSWORD=

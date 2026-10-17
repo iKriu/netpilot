@@ -1,0 +1,10 @@
+.tools/
+dist/
+data/
+web-m3/build/
+web-m3/.gradle/
+web-m3/.kotlin/
+*.tmp
+.claude/worktrees/
+release.key
+*.key
