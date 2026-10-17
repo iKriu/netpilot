@@ -27,7 +27,8 @@ func (a *App) InstallCore(ctx context.Context, name string) (string, error) {
 		return "", fmt.Errorf("ядро %q встроено и не требует установки", name)
 	}
 	a.mu.Lock()
-	running := a.active == c
+	// Упавшее ядро, которое вот-вот перезапустится, тоже не трогаем.
+	running := a.active == c || (a.restart.pending && a.restart.core == name)
 	a.mu.Unlock()
 	if running {
 		return "", errors.New("ядро сейчас работает — остановите его или выберите другое, затем обновите")
@@ -48,7 +49,7 @@ func (a *App) UninstallCore(name string) error {
 		return fmt.Errorf("ядро %q встроено и не удаляется", name)
 	}
 	a.mu.Lock()
-	running := a.active == c
+	running := a.active == c || (a.restart.pending && a.restart.core == name)
 	a.mu.Unlock()
 	if running {
 		return errors.New("ядро сейчас работает — сначала остановите его")

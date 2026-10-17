@@ -34,6 +34,23 @@ type Reloader interface {
 	Reload(cfg *model.Config, env Env) error
 }
 
+// Exiter — ядро в отдельном процессе, которое может завершиться само (упасть).
+// Приложение следит за этим: иначе оно считало бы ядро работающим, а в
+// прозрачном режиме отправляло бы трафик сети в несуществующий процесс.
+type Exiter interface {
+	// Exited закрывается, когда процесс текущего запуска завершился
+	// (в том числе после Stop). Брать сразу после успешного Start.
+	Exited() <-chan struct{}
+	// ExitReason — причина завершения и хвост журнала ядра.
+	ExitReason() string
+}
+
+// Checker — ядро со своими ограничениями конфигурации сверх Capabilities
+// (например, синтаксис правил). Validate добавляет его замечания.
+type Checker interface {
+	Check(cfg *model.Config) []Issue
+}
+
 // ErrReloadUnsupported — перезагрузка без остановки здесь невозможна, нужен перезапуск.
 var ErrReloadUnsupported = errors.New("перезагрузка без остановки не поддерживается")
 
@@ -105,6 +122,9 @@ func Validate(c Core, cfg *model.Config) []Issue {
 				break
 			}
 		}
+	}
+	if ch, ok := c.(Checker); ok {
+		issues = append(issues, ch.Check(cfg)...)
 	}
 	return issues
 }

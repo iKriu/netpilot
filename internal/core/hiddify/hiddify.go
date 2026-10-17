@@ -28,15 +28,19 @@ type Core struct {
 	clash string
 }
 
+var _ core.Exiter = (*Core)(nil) // за падением процесса следит приложение
+
 func New(dataDir string) *Core { return &Core{dir: filepath.Join(dataDir, "cores", "hiddify")} }
 
 // На Windows ядро — библиотека hiddify-core.dll, а запускает её HiddifyCli.exe.
 var binary = map[bool]string{true: "HiddifyCli.exe", false: "hiddify-core"}[runtime.GOOS == "windows"]
 
-func (c *Core) Name() string    { return "hiddify" }
-func (c *Core) Version() string { return external.InstalledVersion(c.dir, binary) }
-func (c *Core) Available() bool { return c.Version() != "" }
-func (c *Core) Running() bool   { return c.proc.Running() }
+func (c *Core) Name() string            { return "hiddify" }
+func (c *Core) Version() string         { return external.InstalledVersion(c.dir, binary) }
+func (c *Core) Available() bool         { return c.Version() != "" }
+func (c *Core) Running() bool           { return c.proc.Running() }
+func (c *Core) Exited() <-chan struct{} { return c.proc.Exited() }
+func (c *Core) ExitReason() string      { return c.proc.ExitReason() }
 
 func (c *Core) ClashAPI() string {
 	c.mu.Lock()
@@ -67,7 +71,7 @@ func (c *Core) Capabilities() core.Capabilities {
 
 func (c *Core) Render(cfg *model.Config, env core.Env) ([]byte, error) {
 	env.Compat113 = true // Hiddify Core 4.x собран на sing-box 1.13
-	return singbox.Render(cfg, env)
+	return singbox.RenderExternal(cfg, env)
 }
 
 func (c *Core) Start(cfg *model.Config, env core.Env) error {

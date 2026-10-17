@@ -40,6 +40,17 @@ func groupTag(id string) string { return "group-" + id }
 
 // Render переводит единую модель в конфиг sing-box.
 func Render(cfg *model.Config, env core.Env) ([]byte, error) {
+	return render(cfg, env, false)
+}
+
+// RenderExternal — конфиг для sing-box в отдельном процессе (Hiddify): журнал
+// идёт в stderr, а в файл его пишет NetPilot с ограничением размера. Если бы
+// процесс сам писал в core.log, файл рос бы без предела.
+func RenderExternal(cfg *model.Config, env core.Env) ([]byte, error) {
+	return render(cfg, env, true)
+}
+
+func render(cfg *model.Config, env core.Env, external bool) ([]byte, error) {
 	s := cfg.Settings
 	r := &renderer{cfg: cfg, ruleSets: map[string]M{}, listsDir: env.ListsDir}
 
@@ -214,6 +225,9 @@ func Render(cfg *model.Config, env core.Env) ([]byte, error) {
 		"outbounds":    outbounds,
 		"route":        route,
 		"experimental": experimental,
+	}
+	if external {
+		conf["log"] = M{"level": orDefault(s.LogLevel, "info"), "timestamp": true, "disable_color": true}
 	}
 	if !env.Compat113 {
 		conf["http_clients"] = []M{{"tag": httpDirect}} // без detour — прямое подключение

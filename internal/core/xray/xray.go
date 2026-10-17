@@ -25,15 +25,19 @@ type Core struct {
 	stats statsClient
 }
 
+var _ core.Exiter = (*Core)(nil) // за падением процесса следит приложение
+
 func New(dataDir string) *Core { return &Core{dir: filepath.Join(dataDir, "cores", "xray")} }
 
 var binary = external.Exe("xray")
 
-func (c *Core) Name() string     { return "xray" }
-func (c *Core) Version() string  { return external.InstalledVersion(c.dir, binary) }
-func (c *Core) Available() bool  { return c.Version() != "" }
-func (c *Core) Running() bool    { return c.proc.Running() }
-func (c *Core) ClashAPI() string { return "" }
+func (c *Core) Name() string            { return "xray" }
+func (c *Core) Version() string         { return external.InstalledVersion(c.dir, binary) }
+func (c *Core) Available() bool         { return c.Version() != "" }
+func (c *Core) Running() bool           { return c.proc.Running() }
+func (c *Core) Exited() <-chan struct{} { return c.proc.Exited() }
+func (c *Core) ExitReason() string      { return c.proc.ExitReason() }
+func (c *Core) ClashAPI() string        { return "" }
 func (c *Core) Stop() error {
 	c.stats.close()
 	return c.proc.Stop()

@@ -131,6 +131,8 @@ export async function pageSettings() {
     row('Перехват DNS', 'Провайдер не видит, какие сайты открываются', sw(s.hijackDns, v => s.hijackDns = v, null)),
     row('IPv6', 'Блокировка — устройства сразу переходят на IPv4 и не идут мимо прокси',
       seg([['block', 'Блокировать'], ['intercept', 'Перехватывать'], ['off', 'Не трогать']], s.ipv6 || 'block', v => s.ipv6 = v)),
+    row('Если ядро упало', 'Пока NetPilot перезапускает ядро: устройства идут в интернет без прокси или остаются без интернета',
+      seg([['open', 'Пускать напрямую'], ['closed', 'Блокировать интернет']], s.coreFailure || 'open', v => s.coreFailure = v)),
     row('Порт перехвата (TPROXY)', 'Внутренний порт для перехваченного трафика', h('input', { class: 'inp', type: 'number', value: s.tproxyPort, style: 'width:120px', oninput: e => s.tproxyPort = +e.target.value })),
     row('Состояние перехвата', [tp && tp.error, ...arr(tp && tp.problems)].filter(Boolean).join(' · ') || null,
       !tp ? h('span', { class: 'chip' }, '—') : tp.active ? h('span', { class: 'chip ok' }, 'включён') : tp.supported ? h('span', { class: 'chip' }, 'включится при запуске шлюза') : h('span', { class: 'chip bad' }, 'недоступен на этой системе')),

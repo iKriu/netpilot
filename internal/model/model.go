@@ -67,6 +67,10 @@ type Settings struct {
 	// IPv6 в прозрачном режиме: "block" — отклонять (устройства перейдут на IPv4),
 	// "intercept" — перехватывать как IPv4, "off" — не трогать.
 	IPv6 string `json:"ipv6"`
+	// CoreFailure — что делать, если ядро неожиданно завершилось: "open" (или "") —
+	// снять перехват, устройства идут напрямую; "closed" — оставить перехват,
+	// интернет заблокирован, пока ядро не вернётся (kill switch).
+	CoreFailure string `json:"coreFailure"`
 
 	// Прокси-вход (HTTP + SOCKS5 на одном порту).
 	ListenAddr  string `json:"listenAddr"`

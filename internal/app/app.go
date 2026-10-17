@@ -58,6 +58,10 @@ type App struct {
 	// dirtyBySubs — единственная причина dirty: автообновление подписок.
 	// Тогда конфигурацию можно применить без участия пользователя.
 	dirtyBySubs bool
+	// coreGen — номер запуска ядра; меняется при каждом запуске и остановке,
+	// чтобы отличать падение ядра от нашей остановки (см. watch_core.go).
+	coreGen uint64
+	restart restartState // перезапуск после падения ядра
 
 	fwOn  bool   // перехват трафика включён
 	fwErr string // последняя ошибка nftables
@@ -115,6 +119,7 @@ func (a *App) Start() error {
 	a.ensureLists(context.Background(), listsMaxAge) // до блокировки: загрузка бывает долгой
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.restart.fails = nil // запуск вручную — счёт сбоев с начала
 	return a.startLocked()
 }
 
@@ -142,6 +147,9 @@ func (a *App) startLocked() error {
 		return fmt.Errorf("%s: %w", choice.Core.Name(), err)
 	}
 	a.active, a.choice, a.startedAt, a.lastErr, a.dirty, a.dirtyBySubs = choice.Core, choice, time.Now(), "", false, false
+	a.coreGen++
+	a.restart.pending = false
+	a.watchLocked(choice.Core)
 	log.Printf("ядро %s %s запущено (%s)", choice.Core.Name(), choice.Core.Version(), choice.Reason)
 	a.kickAuto()
 	// Перехват включается только после того, как ядро готово принимать трафик.
@@ -160,7 +168,11 @@ func (a *App) Stop() error {
 }
 
 func (a *App) stopLocked() error {
+	a.coreGen++ // завершение ядра теперь ожидаемое, назначенный перезапуск отменяется
+	a.restart.pending = false
 	if a.active == nil {
+		// Ядро могло упасть при политике «блокировать интернет»: перехват остался.
+		a.removeFirewallLocked()
 		return nil
 	}
 	// Сначала снимаем перехват: иначе трафик устройств уйдёт в остановленное ядро.
@@ -178,6 +190,7 @@ func (a *App) Apply() error {
 	a.ensureLists(context.Background(), listsMaxAge) // новые правила могли сослаться на новые списки
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.restart.fails = nil
 	if a.active != nil {
 		err := a.reloadLocked()
 		if err == nil {
@@ -230,19 +243,21 @@ func (a *App) reloadLocked() error {
 }
 
 type Status struct {
-	Version   string       `json:"version"`
-	OS        string       `json:"os"`
-	Arch      string       `json:"arch"`
-	Running   bool         `json:"running"`
-	Core      string       `json:"core,omitempty"`
-	CoreVer   string       `json:"coreVersion,omitempty"`
-	Reason    string       `json:"reason,omitempty"`
-	Issues    []core.Issue `json:"issues,omitempty"`
-	StartedAt int64        `json:"startedAt,omitempty"`
-	Dirty     bool         `json:"dirty"`
-	Error     string       `json:"error,omitempty"`
-	Proxy     string       `json:"proxy"`
-	LanIPs    []string     `json:"lanIps,omitempty"` // адреса NetPilot в локальной сети
+	Version string `json:"version"`
+	OS      string `json:"os"`
+	Arch    string `json:"arch"`
+	Running bool   `json:"running"`
+	// Restarting — ядро упало и будет перезапущено (причина — в Error).
+	Restarting bool         `json:"restarting,omitempty"`
+	Core       string       `json:"core,omitempty"`
+	CoreVer    string       `json:"coreVersion,omitempty"`
+	Reason     string       `json:"reason,omitempty"`
+	Issues     []core.Issue `json:"issues,omitempty"`
+	StartedAt  int64        `json:"startedAt,omitempty"`
+	Dirty      bool         `json:"dirty"`
+	Error      string       `json:"error,omitempty"`
+	Proxy      string       `json:"proxy"`
+	LanIPs     []string     `json:"lanIps,omitempty"` // адреса NetPilot в локальной сети
 }
 
 func (a *App) Status() Status {
@@ -251,7 +266,7 @@ func (a *App) Status() Status {
 	s := a.Store.Get().Settings
 	st := Status{
 		Version: Version, OS: runtime.GOOS, Arch: runtime.GOARCH,
-		Dirty: a.dirty, Error: a.lastErr,
+		Dirty: a.dirty, Error: a.lastErr, Restarting: a.restart.pending,
 		Proxy:  net.JoinHostPort(s.ListenAddr, strconv.Itoa(s.MixedPort)),
 		LanIPs: scan.LocalAddrs(),
 	}

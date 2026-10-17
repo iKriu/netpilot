@@ -31,14 +31,21 @@ type Core struct {
 	clash string
 }
 
+var (
+	_ core.Exiter  = (*Core)(nil) // за падением процесса следит приложение
+	_ core.Checker = (*Core)(nil)
+)
+
 func New(dataDir string) *Core { return &Core{dir: filepath.Join(dataDir, "cores", "mihomo")} }
 
 var binary = external.Exe("mihomo")
 
-func (c *Core) Name() string    { return "mihomo" }
-func (c *Core) Version() string { return external.InstalledVersion(c.dir, binary) }
-func (c *Core) Available() bool { return c.Version() != "" }
-func (c *Core) Running() bool   { return c.proc.Running() }
+func (c *Core) Name() string            { return "mihomo" }
+func (c *Core) Version() string         { return external.InstalledVersion(c.dir, binary) }
+func (c *Core) Available() bool         { return c.Version() != "" }
+func (c *Core) Running() bool           { return c.proc.Running() }
+func (c *Core) Exited() <-chan struct{} { return c.proc.Exited() }
+func (c *Core) ExitReason() string      { return c.proc.ExitReason() }
 
 func (c *Core) ClashAPI() string {
 	c.mu.Lock()
@@ -275,7 +282,9 @@ func render(cfg *model.Config, plan *core.Plan, env core.Env) ([]byte, error) {
 		}
 		for _, p := range parts {
 			if p != nil {
-				rules = append(rules, rule(p, target(p.Action, p.Target)))
+				if line := rule(p, target(p.Action, p.Target)); line != "" {
+					rules = append(rules, line)
+				}
 			}
 		}
 	}
@@ -309,7 +318,38 @@ func sortedKeys(m map[string]string) []string {
 	return out
 }
 
+// unsafe — значение, которое сломает строку правила mihomo: запятая и скобки
+// там разделители, а экранирования нет. С таким правилом mihomo не запустится.
+func unsafe(v string) bool { return strings.ContainsAny(v, ",()") }
+
+// Check — условия правил, которые mihomo не может записать (см. unsafe).
+// Они пропускаются при сборке конфига; здесь — объяснение для интерфейса.
+func (c *Core) Check(cfg *model.Config) []core.Issue {
+	var issues []core.Issue
+	for _, r := range cfg.Rules {
+		if !r.Enabled {
+			continue
+		}
+		var bad []string
+		for _, list := range [][]string{r.What.Domains, r.What.Geosite, r.What.Geoip} {
+			for _, v := range list {
+				if unsafe(v) {
+					bad = append(bad, "«"+v+"»")
+				}
+			}
+		}
+		if len(bad) > 0 {
+			issues = append(issues, core.Issue{Message: fmt.Sprintf(
+				"правило «%s»: %s — запятые и скобки mihomo не понимает, условие пропущено", r.Name, strings.Join(bad, ", "))})
+		}
+	}
+	return issues
+}
+
 // rule собирает правило mihomo: внутри блока — OR, между блоками — AND.
+// Значения с запятой или скобками пропускаются (см. unsafe); если от условий
+// на домены не осталось ничего, правило не создаётся ("") — иначе оно
+// сработало бы для всего трафика.
 func rule(r *core.PlanRule, target string) string {
 	var blocks []string
 	add := func(items []string) {
@@ -328,22 +368,26 @@ func rule(r *core.PlanRule, target string) string {
 	add(src)
 
 	var what []string
-	for _, x := range r.Domains {
-		what = append(what, "DOMAIN,"+x)
+	skipped := false
+	addSafe := func(kind string, items []string) {
+		for _, x := range items {
+			if unsafe(x) {
+				skipped = true
+				continue
+			}
+			what = append(what, kind+","+x)
+		}
 	}
-	for _, x := range r.Suffixes {
-		what = append(what, "DOMAIN-SUFFIX,"+x)
-	}
-	for _, x := range r.Keywords {
-		what = append(what, "DOMAIN-KEYWORD,"+x)
-	}
-	for _, x := range r.Regexps {
-		what = append(what, "DOMAIN-REGEX,"+x)
-	}
-	for _, x := range r.Geosite {
-		what = append(what, "GEOSITE,"+x)
-	}
+	addSafe("DOMAIN", r.Domains)
+	addSafe("DOMAIN-SUFFIX", r.Suffixes)
+	addSafe("DOMAIN-KEYWORD", r.Keywords)
+	addSafe("DOMAIN-REGEX", r.Regexps)
+	addSafe("GEOSITE", r.Geosite)
 	for _, x := range r.Geoip {
+		if unsafe(x) {
+			skipped = true
+			continue
+		}
 		what = append(what, "GEOIP,"+strings.ToUpper(x))
 	}
 	for _, x := range r.CIDRs {
@@ -358,6 +402,9 @@ func rule(r *core.PlanRule, target string) string {
 	}
 	for _, id := range sortedKeys(r.IPLists) {
 		what = append(what, "RULE-SET,"+id)
+	}
+	if skipped && len(what) == 0 {
+		return ""
 	}
 	add(what)
 

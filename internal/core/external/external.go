@@ -21,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"netpilot/internal/core/logfile"
 )
 
 // Downloader скачивает файл (приложение подставляет свою функцию: напрямую,
@@ -29,10 +31,11 @@ type Downloader func(ctx context.Context, url string, limit int64) ([]byte, erro
 
 // Process — ядро, запущенное отдельным процессом.
 type Process struct {
-	mu   sync.Mutex
-	cmd  *exec.Cmd
-	done chan struct{}
-	err  error
+	mu      sync.Mutex
+	cmd     *exec.Cmd
+	done    chan struct{} // закрывается, когда процесс текущего запуска завершился
+	exitErr *error        // с чем он завершился; читать только после закрытия done
+	logPath string
 }
 
 // Start запускает процесс и ждёт немного: если ядро сразу упало (ошибка в
@@ -43,16 +46,22 @@ func (p *Process) Start(bin string, args []string, dir, logPath string) error {
 	if p.cmd != nil {
 		return errors.New("ядро уже запущено")
 	}
-	logf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	logw, err := logfile.Create(logPath, logfile.MaxSize)
 	if err != nil {
 		return err
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = dir
-	cmd.Stdout, cmd.Stderr = logf, logf
+	cmd.Stdout, cmd.Stderr = logw, logw
+	// Вывод идёт через каналы: если ядро оставило дочерний процесс с теми же
+	// каналами, Wait без этого ждал бы и его, и выход ядра остался бы незамеченным.
+	cmd.WaitDelay = 2 * time.Second
 	hideWindow(cmd)
 	started := make(chan error, 1)
 	done := make(chan struct{})
+	// Код завершения записывается до закрытия done и читается после: так он
+	// виден без блокировки p.mu, которую Start держит, пока ждёт раннего падения.
+	exitErr := new(error)
 	go func() {
 		// На Linux сигнал о смерти родителя (Pdeathsig) привязан к потоку,
 		// который запустил процесс. Держим этот поток, пока ядро работает,
@@ -64,15 +73,12 @@ func (p *Process) Start(bin string, args []string, dir, logPath string) error {
 		}
 		bindToParent(cmd) // Windows: ядро завершится вместе с NetPilot
 		started <- nil
-		err := cmd.Wait()
-		logf.Close()
-		p.mu.Lock()
-		p.err = err
-		p.mu.Unlock()
+		*exitErr = cmd.Wait()
+		logw.Close()
 		close(done)
 	}()
 	if err := <-started; err != nil {
-		logf.Close()
+		logw.Close()
 		return err
 	}
 	select {
@@ -80,7 +86,7 @@ func (p *Process) Start(bin string, args []string, dir, logPath string) error {
 		return fmt.Errorf("ядро завершилось сразу после запуска: %s", tail(logPath, 600))
 	case <-time.After(1200 * time.Millisecond):
 	}
-	p.cmd, p.done = cmd, done
+	p.cmd, p.done, p.exitErr, p.logPath = cmd, done, exitErr, logPath
 	return nil
 }
 
@@ -99,6 +105,44 @@ func (p *Process) Stop() error {
 		return errors.New("ядро не остановилось за 5 секунд")
 	}
 	return nil
+}
+
+// closedChan — для Exited, когда процесс не запущен: наблюдатель сразу
+// проснётся и увидит, что следить не за чем, а не повиснет навсегда.
+var closedChan = func() chan struct{} { c := make(chan struct{}); close(c); return c }()
+
+// Exited закрывается, когда процесс текущего запуска завершился — сам или
+// через Stop (отличать — забота вызывающего).
+func (p *Process) Exited() <-chan struct{} {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.done == nil {
+		return closedChan
+	}
+	return p.done
+}
+
+// ExitReason — с чем завершился процесс и хвост журнала: что показать пользователю.
+func (p *Process) ExitReason() string {
+	p.mu.Lock()
+	done, exitErr, logPath := p.done, p.exitErr, p.logPath
+	p.mu.Unlock()
+	msg := "процесс завершился"
+	if done != nil {
+		select {
+		case <-done:
+			if *exitErr != nil {
+				msg = (*exitErr).Error()
+			}
+		default:
+		}
+	}
+	if logPath != "" {
+		if t := tail(logPath, 600); t != "" {
+			msg += ": " + t
+		}
+	}
+	return msg
 }
 
 // Signal отправляет сигнал работающему процессу (например, SIGHUP — перечитать настройки).
@@ -206,19 +250,8 @@ func Install(ctx context.Context, dl Downloader, rel Release, dir string) (strin
 	if err != nil {
 		return "", fmt.Errorf("загрузка %s: %w", name, err)
 	}
-	if rel.Digest != nil {
-		dname := rel.Digest(name)
-		if urls[dname] == "" {
-			return "", fmt.Errorf("в релизе нет контрольной суммы %s", dname)
-		}
-		dg, err := dl(ctx, urls[dname], 64<<10)
-		if err != nil {
-			return "", fmt.Errorf("контрольная сумма: %w", err)
-		}
-		sum := sha256.Sum256(data)
-		if !strings.Contains(strings.ToLower(string(dg)), hex.EncodeToString(sum[:])) {
-			return "", errors.New("контрольная сумма не совпала — файл повреждён или подменён")
-		}
+	if err := verify(ctx, dl, rel, name, data, urls, digests[name]); err != nil {
+		return "", err
 	}
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -311,6 +344,37 @@ func Install(ctx context.Context, dl Downloader, rel Release, dir string) (strin
 	version := strings.TrimPrefix(gh.Tag, "v")
 	_ = os.WriteFile(filepath.Join(dir, "VERSION"), []byte(version), 0o644)
 	return version, nil
+}
+
+// verify сверяет SHA-256 скачанного файла: с файлом контрольных сумм из
+// релиза, а если его нет (mihomo, Hiddify) — с суммой, которую GitHub
+// публикует для каждого файла. Без проверки ядро не ставится: это исполняемый
+// файл, который получит весь трафик сети.
+func verify(ctx context.Context, dl Downloader, rel Release, name string, data []byte, urls map[string]string, ghDigest string) error {
+	sum := sha256.Sum256(data)
+	want := hex.EncodeToString(sum[:])
+	if rel.Digest != nil {
+		dname := rel.Digest(name)
+		if urls[dname] == "" {
+			return fmt.Errorf("в релизе нет контрольной суммы %s", dname)
+		}
+		dg, err := dl(ctx, urls[dname], 64<<10)
+		if err != nil {
+			return fmt.Errorf("контрольная сумма: %w", err)
+		}
+		if !strings.Contains(strings.ToLower(string(dg)), want) {
+			return errors.New("контрольная сумма не совпала — файл повреждён или подменён")
+		}
+		return nil
+	}
+	algo, hexSum, ok := strings.Cut(strings.TrimSpace(ghDigest), ":")
+	if !ok || !strings.EqualFold(algo, "sha256") || hexSum == "" {
+		return fmt.Errorf("GitHub не сообщил контрольную сумму %s — без проверки ядро не устанавливается", name)
+	}
+	if !strings.EqualFold(hexSum, want) {
+		return errors.New("контрольная сумма не совпала с указанной на GitHub — файл повреждён или подменён")
+	}
+	return nil
 }
 
 // InstalledVersion читает версию установленного ядра ("" — не установлено).

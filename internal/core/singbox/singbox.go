@@ -20,6 +20,7 @@ import (
 	"github.com/sagernet/sing/common/json"
 
 	"netpilot/internal/core"
+	"netpilot/internal/core/logfile"
 	"netpilot/internal/model"
 )
 
@@ -29,6 +30,8 @@ type Core struct {
 	cancel context.CancelFunc
 	clash  string
 	gen    int // номер экземпляра: у соседних разные файлы кэша
+	// stopTrim останавливает слежение за размером журнала.
+	stopTrim chan struct{}
 
 	// Прежний экземпляр, который дорабатывает начатые соединения.
 	draining *drainingBox
@@ -85,7 +88,9 @@ func (c *Core) Start(cfg *model.Config, env core.Env) error {
 	if c.box != nil {
 		return errors.New("ядро уже запущено")
 	}
-	_ = os.Remove(filepath.Join(env.DataDir, "core.log"))
+	logPath := filepath.Join(env.DataDir, "core.log")
+	_ = os.Remove(logPath)
+	_ = os.Remove(logPath + ".1")
 	c.gen = 0
 	env.CacheFile = "cache-0.db"
 	instance, cancel, err := build(cfg, env)
@@ -93,7 +98,24 @@ func (c *Core) Start(cfg *model.Config, env core.Env) error {
 		return err
 	}
 	c.box, c.cancel, c.clash = instance, cancel, env.ClashAddr
+	c.stopTrim = make(chan struct{})
+	go trimLog(logPath, c.stopTrim)
 	return nil
+}
+
+// trimLog не даёт журналу расти без предела: sing-box сам пишет в файл
+// (дописывая в конец), поэтому файл периодически обрезается со стороны.
+func trimLog(path string, stop <-chan struct{}) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			_ = logfile.Trim(path, logfile.MaxSize)
+		}
+	}
 }
 
 // Reload применяет новую конфигурацию без остановки (только Linux): новый
@@ -145,9 +167,21 @@ func build(cfg *model.Config, env core.Env) (*box.Box, context.CancelFunc, error
 	if err != nil {
 		return nil, nil, err
 	}
-	// Сохраняем итоговый конфиг: удобно для отладки и сравнения с внешним sing-box.
+	// Итоговый конфиг сохраняется для отладки и сравнения с внешним sing-box:
+	// в sing-box.json — только запущенный, иначе после неудачного применения
+	// файл показывал бы не то, что работает. Не запустившийся — рядом.
+	failed := filepath.Join(env.DataDir, "sing-box.failed.json")
+	instance, cancel, err := startBox(data)
+	if err != nil {
+		_ = os.WriteFile(failed, data, 0o600)
+		return nil, nil, err
+	}
 	_ = os.WriteFile(filepath.Join(env.DataDir, "sing-box.json"), data, 0o600)
+	_ = os.Remove(failed)
+	return instance, cancel, nil
+}
 
+func startBox(data []byte) (*box.Box, context.CancelFunc, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx = include.Context(ctx)
 	opts, err := json.UnmarshalExtendedContext[option.Options](ctx, data)
@@ -174,6 +208,10 @@ func (c *Core) Stop() error {
 	if c.draining != nil {
 		c.draining.close()
 		c.draining = nil
+	}
+	if c.stopTrim != nil {
+		close(c.stopTrim)
+		c.stopTrim = nil
 	}
 	if c.box == nil {
 		return nil

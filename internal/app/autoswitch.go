@@ -29,6 +29,10 @@ import (
 //     сбоил в трёх проверках из пяти. Тогда серверы перебираются по одному
 //     в порядке прошлых задержек, и берётся первый ответивший.
 //
+// Группы проверяются одновременно, каждая — в своей горутине: первый перебор
+// большой группы (сотня серверов по 3 секунды) не задерживает переключение
+// в остальных. Внутри группы проверки по-прежнему строго по одному.
+//
 // Выбор хранится в data/auto.json и передаётся ядру при каждом запуске
 // (core.Env.Selected): применение настроек его не сбрасывает.
 
@@ -47,6 +51,7 @@ type autoState struct {
 	lat      map[string]Latency   // id сервера → последний замер
 	scan     map[string][2]int    // тег группы → идёт перебор: проверено, всего
 	errs     map[string]string
+	busy     map[string]bool // тег группы → проверка идёт (следующая минута её не запускает повторно)
 	kick     chan struct{}
 }
 
@@ -71,6 +76,7 @@ func (s *autoState) init(dataDir string) {
 	s.loaded = true
 	s.selected, s.history, s.checked = map[string]string{}, map[string][]bool{}, map[string]time.Time{}
 	s.lat, s.scan, s.errs = map[string]Latency{}, map[string][2]int{}, map[string]string{}
+	s.busy = map[string]bool{}
 	if b, err := os.ReadFile(filepath.Join(dataDir, "auto.json")); err == nil {
 		_ = json.Unmarshal(b, &s.selected)
 	}
@@ -176,12 +182,40 @@ func (a *App) autoTick(ctx context.Context) {
 		return
 	}
 	cfg := a.Store.Get()
-	for _, g := range autoGroups(cfg) {
+	a.checkGroups(ctx, act.ClashAPI(), autoGroups(cfg), cfg.Settings.TestURL)
+}
+
+// checkGroups запускает проверку групп, не дожидаясь их завершения: долгий
+// перебор одной группы не должен держать остальные до следующей минуты.
+// Группа, проверка которой ещё идёт, пропускается — иначе два перебора одной
+// группы шли бы параллельно и спорили о выборе. WaitGroup — для тестов.
+func (a *App) checkGroups(ctx context.Context, api string, groups []autoGroupInfo, testURL string) *sync.WaitGroup {
+	st := &a.auto
+	var wg sync.WaitGroup
+	for _, g := range groups {
 		if !g.InUse || g.Manual || ctx.Err() != nil {
 			continue
 		}
-		a.checkGroup(ctx, act.ClashAPI(), g, cfg.Settings.TestURL)
+		st.mu.Lock()
+		st.init(a.DataDir)
+		if st.busy[g.Tag] {
+			st.mu.Unlock()
+			continue
+		}
+		st.busy[g.Tag] = true
+		st.mu.Unlock()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				st.mu.Lock()
+				delete(st.busy, g.Tag)
+				st.mu.Unlock()
+			}()
+			a.checkGroup(ctx, api, g, testURL)
+		}()
 	}
+	return &wg
 }
 
 func (a *App) checkGroup(ctx context.Context, api string, g autoGroupInfo, testURL string) {
@@ -310,11 +344,13 @@ func (a *App) selectNode(ctx context.Context, api string, g autoGroupInfo, id, w
 	st.selected[g.Tag] = id
 	st.history[g.Tag] = nil
 	delete(st.errs, g.Tag)
-	data, _ := json.Marshal(st.selected)
-	st.mu.Unlock()
 	if prev != id {
+		// Пишем под блокировкой: группы проверяются одновременно, и снимок,
+		// записанный позже, не должен затереть более свежий выбор другой группы.
+		data, _ := json.Marshal(st.selected)
 		_ = os.WriteFile(filepath.Join(a.DataDir, "auto.json"), data, 0o600)
 	}
+	st.mu.Unlock()
 
 	body, _ := json.Marshal(map[string]string{"name": core.NodeTag(id)})
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPut, "http://"+api+"/proxies/"+url.PathEscape(g.Tag), bytes.NewReader(body))
