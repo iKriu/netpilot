@@ -37,7 +37,7 @@ func (c *Core) Available() bool         { return c.Version() != "" }
 func (c *Core) Running() bool           { return c.proc.Running() }
 func (c *Core) Exited() <-chan struct{} { return c.proc.Exited() }
 func (c *Core) ExitReason() string      { return c.proc.ExitReason() }
-func (c *Core) ClashAPI() string        { return "" }
+func (c *Core) ClashAPI() core.Clash    { return core.Clash{} }
 func (c *Core) Stop() error {
 	c.stats.close()
 	return c.proc.Stop()

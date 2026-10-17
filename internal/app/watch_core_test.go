@@ -24,7 +24,7 @@ func (f *fakeProc) Name() string                    { return "fake" }
 func (f *fakeProc) Version() string                 { return "1" }
 func (f *fakeProc) Available() bool                 { return true }
 func (f *fakeProc) Capabilities() core.Capabilities { return core.Capabilities{} }
-func (f *fakeProc) ClashAPI() string                { return "" }
+func (f *fakeProc) ClashAPI() core.Clash            { return core.Clash{} }
 func (f *fakeProc) ExitReason() string              { return "exit status 2: panic" }
 func (f *fakeProc) Render(*model.Config, core.Env) ([]byte, error) {
 	return nil, nil

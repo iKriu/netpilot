@@ -25,7 +25,7 @@ type Core struct {
 	dir   string
 	proc  external.Process
 	mu    sync.Mutex
-	clash string
+	clash core.Clash
 }
 
 var _ core.Exiter = (*Core)(nil) // за падением процесса следит приложение
@@ -42,18 +42,18 @@ func (c *Core) Running() bool           { return c.proc.Running() }
 func (c *Core) Exited() <-chan struct{} { return c.proc.Exited() }
 func (c *Core) ExitReason() string      { return c.proc.ExitReason() }
 
-func (c *Core) ClashAPI() string {
+func (c *Core) ClashAPI() core.Clash {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.proc.Running() {
-		return ""
+		return core.Clash{}
 	}
 	return c.clash
 }
 
 func (c *Core) Stop() error {
 	c.mu.Lock()
-	c.clash = ""
+	c.clash = core.Clash{}
 	c.mu.Unlock()
 	return c.proc.Stop()
 }
@@ -111,7 +111,7 @@ func (c *Core) Start(cfg *model.Config, env core.Env) error {
 		}
 	}
 	c.mu.Lock()
-	c.clash = env.ClashAddr
+	c.clash = core.Clash{Addr: env.ClashAddr, Secret: env.ClashSecret}
 	c.mu.Unlock()
 	return nil
 }

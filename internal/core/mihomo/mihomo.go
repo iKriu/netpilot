@@ -28,7 +28,7 @@ type Core struct {
 	dir   string
 	proc  external.Process
 	mu    sync.Mutex
-	clash string
+	clash core.Clash
 }
 
 var (
@@ -47,7 +47,7 @@ func (c *Core) Running() bool           { return c.proc.Running() }
 func (c *Core) Exited() <-chan struct{} { return c.proc.Exited() }
 func (c *Core) ExitReason() string      { return c.proc.ExitReason() }
 
-func (c *Core) ClashAPI() string {
+func (c *Core) ClashAPI() core.Clash {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.clash
@@ -55,7 +55,7 @@ func (c *Core) ClashAPI() string {
 
 func (c *Core) Stop() error {
 	c.mu.Lock()
-	c.clash = ""
+	c.clash = core.Clash{}
 	c.mu.Unlock()
 	return c.proc.Stop()
 }
@@ -98,7 +98,7 @@ func (c *Core) Start(cfg *model.Config, env core.Env) error {
 		return err
 	}
 	c.mu.Lock()
-	c.clash = env.ClashAddr
+	c.clash = core.Clash{Addr: env.ClashAddr, Secret: env.ClashSecret}
 	c.mu.Unlock()
 	return nil
 }
@@ -109,10 +109,12 @@ func (c *Core) Reload(cfg *model.Config, env core.Env) error {
 	c.mu.Lock()
 	api := c.clash
 	c.mu.Unlock()
-	if api == "" || !c.proc.Running() {
+	if api.Addr == "" || !c.proc.Running() {
 		return core.ErrReloadUnsupported
 	}
-	env.ClashAddr = api // адрес API не меняем, иначе потеряем связь с ядром
+	// Адрес и ключ API не меняем: процесс продолжает работать с прежними,
+	// иначе потеряем связь с ядром.
+	env.ClashAddr, env.ClashSecret = api.Addr, api.Secret
 	data, err := c.Render(cfg, env)
 	if err != nil {
 		return err
@@ -131,8 +133,10 @@ func (c *Core) Reload(cfg *model.Config, env core.Env) error {
 	body, _ := json.Marshal(map[string]string{"path": path})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPut, "http://"+api+"/configs?force=true", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	req, err := api.Request(ctx, http.MethodPut, "/configs?force=true", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
@@ -194,6 +198,7 @@ func render(cfg *model.Config, plan *core.Plan, env core.Env) ([]byte, error) {
 	}
 	if env.ClashAddr != "" {
 		conf["external-controller"] = env.ClashAddr
+		conf["secret"] = env.ClashSecret
 	}
 	if s.Mode == "transparent" && env.OS == "linux" {
 		conf["tproxy-port"] = s.TProxyPort

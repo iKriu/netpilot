@@ -52,7 +52,7 @@ func RenderExternal(cfg *model.Config, env core.Env) ([]byte, error) {
 
 func render(cfg *model.Config, env core.Env, external bool) ([]byte, error) {
 	s := cfg.Settings
-	r := &renderer{cfg: cfg, ruleSets: map[string]M{}, listsDir: env.ListsDir}
+	r := &renderer{cfg: cfg, ruleSets: map[string]M{}, listsDir: env.ListsDir, env: env}
 
 	outbounds := []M{{"type": "direct", "tag": tagDirect}}
 	for _, n := range cfg.Nodes {
@@ -203,7 +203,7 @@ func render(cfg *model.Config, env core.Env, external bool) ([]byte, error) {
 		"cache_file": M{"enabled": true, "path": filepath.Join(env.DataDir, orDefault(env.CacheFile, "cache.db"))},
 	}
 	if env.ClashAddr != "" {
-		experimental["clash_api"] = M{"external_controller": env.ClashAddr}
+		experimental["clash_api"] = M{"external_controller": env.ClashAddr, "secret": env.ClashSecret}
 	}
 
 	conf := M{
@@ -240,6 +240,7 @@ type renderer struct {
 	valid    []string // теги узлов и групп, реально попавших в конфиг
 	ruleSets map[string]M
 	listsDir string
+	env      core.Env
 }
 
 // listSet — локальный набор правил из скачанного списка ("" — списка нет или
@@ -318,7 +319,8 @@ func (r *renderer) deviceRoutes() []M {
 	groups := map[key][]string{}
 	var order []key
 	for _, d := range r.cfg.Devices {
-		if d.IP == "" || (d.Route != "proxy" && d.Route != "direct" && d.Route != "block") {
+		src := core.DeviceSources(d, r.env)
+		if len(src) == 0 || (d.Route != "proxy" && d.Route != "direct" && d.Route != "block") {
 			continue
 		}
 		k := key{d.Route, ""}
@@ -328,7 +330,7 @@ func (r *renderer) deviceRoutes() []M {
 		if _, ok := groups[k]; !ok {
 			order = append(order, k)
 		}
-		groups[k] = append(groups[k], toCIDR(d.IP))
+		groups[k] = append(groups[k], src...)
 	}
 	var out []M
 	for _, k := range order {
@@ -355,11 +357,8 @@ func (r *renderer) rule(rule model.Rule) (M, bool) {
 	if len(rule.Who.DeviceIDs)+len(rule.Who.Tags)+len(rule.Who.CIDRs) > 0 {
 		var src []string
 		for _, d := range r.cfg.Devices {
-			if d.IP == "" {
-				continue
-			}
 			if slices.Contains(rule.Who.DeviceIDs, d.ID) || intersects(d.Tags, rule.Who.Tags) {
-				src = append(src, toCIDR(d.IP))
+				src = append(src, core.DeviceSources(d, r.env)...)
 			}
 		}
 		for _, c := range rule.Who.CIDRs {

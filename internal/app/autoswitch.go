@@ -178,7 +178,7 @@ func (a *App) autoTick(ctx context.Context) {
 	act := a.active
 	a.mu.Unlock()
 	// Выбором управляем только в sing-box: в mihomo группы — его собственный url-test.
-	if act == nil || !core.SingBoxBased(act.Name()) || act.ClashAPI() == "" {
+	if act == nil || !core.SingBoxBased(act.Name()) || act.ClashAPI().Addr == "" {
 		return
 	}
 	cfg := a.Store.Get()
@@ -189,7 +189,7 @@ func (a *App) autoTick(ctx context.Context) {
 // перебор одной группы не должен держать остальные до следующей минуты.
 // Группа, проверка которой ещё идёт, пропускается — иначе два перебора одной
 // группы шли бы параллельно и спорили о выборе. WaitGroup — для тестов.
-func (a *App) checkGroups(ctx context.Context, api string, groups []autoGroupInfo, testURL string) *sync.WaitGroup {
+func (a *App) checkGroups(ctx context.Context, api core.Clash, groups []autoGroupInfo, testURL string) *sync.WaitGroup {
 	st := &a.auto
 	var wg sync.WaitGroup
 	for _, g := range groups {
@@ -218,7 +218,7 @@ func (a *App) checkGroups(ctx context.Context, api string, groups []autoGroupInf
 	return &wg
 }
 
-func (a *App) checkGroup(ctx context.Context, api string, g autoGroupInfo, testURL string) {
+func (a *App) checkGroup(ctx context.Context, api core.Clash, g autoGroupInfo, testURL string) {
 	st := &a.auto
 	st.mu.Lock()
 	st.init(a.DataDir)
@@ -253,7 +253,7 @@ func (a *App) checkGroup(ctx context.Context, api string, g autoGroupInfo, testU
 }
 
 // scanGroup — первый выбор: все серверы по одному, затем быстрейший.
-func (a *App) scanGroup(ctx context.Context, api string, g autoGroupInfo, testURL, why string) {
+func (a *App) scanGroup(ctx context.Context, api core.Clash, g autoGroupInfo, testURL, why string) {
 	st := &a.auto
 	best, bestMs, provisional := "", 0, false
 	for i, id := range g.Members {
@@ -290,7 +290,7 @@ func (a *App) scanGroup(ctx context.Context, api string, g autoGroupInfo, testUR
 
 // failover — текущий сервер сбоит: перебираем остальные по одному, начиная
 // с самых быстрых по прошлым замерам, и берём первый ответивший.
-func (a *App) failover(ctx context.Context, api string, g autoGroupInfo, testURL, cur string) {
+func (a *App) failover(ctx context.Context, api core.Clash, g autoGroupInfo, testURL, cur string) {
 	st := &a.auto
 	st.mu.Lock()
 	order := slices.DeleteFunc(slices.Clone(g.Members), func(id string) bool { return id == cur })
@@ -328,7 +328,7 @@ func (a *App) failover(ctx context.Context, api string, g autoGroupInfo, testURL
 	st.mu.Unlock()
 }
 
-func (a *App) measure(ctx context.Context, api, id, testURL string) Latency {
+func (a *App) measure(ctx context.Context, api core.Clash, id, testURL string) Latency {
 	l := clashDelay(ctx, api, id, testURL, autoTimeout)
 	st := &a.auto
 	st.mu.Lock()
@@ -337,7 +337,7 @@ func (a *App) measure(ctx context.Context, api, id, testURL string) Latency {
 	return l
 }
 
-func (a *App) selectNode(ctx context.Context, api string, g autoGroupInfo, id, why string) {
+func (a *App) selectNode(ctx context.Context, api core.Clash, g autoGroupInfo, id, why string) {
 	st := &a.auto
 	st.mu.Lock()
 	prev := st.selected[g.Tag]
@@ -353,10 +353,10 @@ func (a *App) selectNode(ctx context.Context, api string, g autoGroupInfo, id, w
 	st.mu.Unlock()
 
 	body, _ := json.Marshal(map[string]string{"name": core.NodeTag(id)})
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPut, "http://"+api+"/proxies/"+url.PathEscape(g.Tag), bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	if res, err := http.DefaultClient.Do(req); err == nil {
-		res.Body.Close()
+	if req, err := api.Request(ctx, http.MethodPut, "/proxies/"+url.PathEscape(g.Tag), bytes.NewReader(body)); err == nil {
+		if res, err := http.DefaultClient.Do(req); err == nil {
+			res.Body.Close()
+		}
 	}
 	if prev != id && a.Store != nil {
 		name := id
@@ -385,11 +385,11 @@ func (a *App) SelectInGroup(ctx context.Context, groupID, nodeID string) error {
 		a.mu.Lock()
 		act := a.active
 		a.mu.Unlock()
-		api := ""
+		var api core.Clash
 		if act != nil && core.SingBoxBased(act.Name()) {
 			api = act.ClashAPI()
 		}
-		if api == "" {
+		if api.Addr == "" {
 			a.storeSelection(g.Tag, nodeID)
 			return nil
 		}

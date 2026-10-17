@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"netpilot/internal/core"
 	"netpilot/internal/model"
 )
 
@@ -118,11 +119,11 @@ func (a *App) WatchTraffic(ctx context.Context) {
 	}
 }
 
-func (a *App) clashAddr() string {
+func (a *App) clashAddr() core.Clash {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.active == nil {
-		return ""
+		return core.Clash{}
 	}
 	return a.active.ClashAPI()
 }
@@ -141,7 +142,7 @@ func (a *App) activeCore() any {
 func (a *App) pollTraffic(ctx context.Context) {
 	tr := &a.traffic
 	api := a.clashAddr()
-	if api == "" {
+	if api.Addr == "" {
 		if src, ok := a.activeCore().(outboundStats); ok {
 			a.pollOutbounds(ctx, src)
 			return
@@ -433,7 +434,7 @@ func (a *App) Connections() ConnectionsView {
 	switch {
 	case a.active == nil:
 		v.Reason = "Ядро остановлено"
-	case a.active.ClashAPI() == "":
+	case a.active.ClashAPI().Addr == "":
 		v.Reason = fmt.Sprintf("Ядро %s не сообщает список соединений — показан общий трафик и трафик по серверам", a.active.Name())
 		_, v.Totals = a.active.(outboundStats)
 	default:
@@ -500,14 +501,17 @@ func (a *App) TrafficBySource() map[string]DeviceTraffic {
 // CloseConnection закрывает соединение ("" — все).
 func (a *App) CloseConnection(ctx context.Context, id string) error {
 	api := a.clashAddr()
-	if api == "" {
+	if api.Addr == "" {
 		return errors.New("ядро не поддерживает управление соединениями")
 	}
 	path := "/connections"
 	if id != "" {
 		path += "/" + url.PathEscape(id)
 	}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodDelete, "http://"+api+path, nil)
+	req, err := api.Request(ctx, http.MethodDelete, path, nil)
+	if err != nil {
+		return err
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
@@ -519,10 +523,13 @@ func (a *App) CloseConnection(ctx context.Context, id string) error {
 	return nil
 }
 
-func clashGet(ctx context.Context, api, path string, v any) error {
+func clashGet(ctx context.Context, api core.Clash, path string, v any) error {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+api+path, nil)
+	req, err := api.Request(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return err
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err

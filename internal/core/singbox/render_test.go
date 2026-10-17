@@ -3,6 +3,7 @@ package singbox
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -191,5 +192,46 @@ func TestRenderLists(t *testing.T) {
 	}
 	if !domainRule || !ipRule {
 		t.Errorf("ожидались правила с доменным и IP-списком: %v", rules())
+	}
+}
+
+// IPv6-адреса устройства входят в его маршрут и правила по устройству, а
+// Clash API защищён ключом.
+func TestRenderDeviceIPv6AndSecret(t *testing.T) {
+	cfg := model.Defaults()
+	cfg.Nodes = []model.Node{{ID: "a", Name: "A", Protocol: "shadowsocks", Server: "1.2.3.4", Port: 8388, Method: "aes-256-gcm", Password: "x"}}
+	cfg.Devices = []model.Device{{ID: "tv", IP: "192.168.1.50", Route: "block"}}
+	cfg.Rules = []model.Rule{{ID: "1", Enabled: true, Who: model.Who{DeviceIDs: []string{"tv"}}, Where: model.Where{Action: "direct"}}}
+	env := core.Env{
+		DataDir: t.TempDir(), OS: "linux", ClashAddr: "127.0.0.1:0", ClashSecret: "s3",
+		DeviceIPv6: map[string][]string{"tv": {"2001:db8::50", "fe80::1"}},
+	}
+	data, err := Render(cfg, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Route struct {
+			Rules []map[string]any `json:"rules"`
+		} `json:"route"`
+		Experimental struct {
+			ClashAPI map[string]any `json:"clash_api"`
+		} `json:"experimental"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Experimental.ClashAPI["secret"] != "s3" {
+		t.Errorf("clash_api без ключа: %v", parsed.Experimental.ClashAPI)
+	}
+	var withSrc []string
+	for _, r := range parsed.Route.Rules {
+		if src, ok := r["source_ip_cidr"].([]any); ok {
+			withSrc = append(withSrc, fmt.Sprint(src))
+		}
+	}
+	want := "[192.168.1.50/32 2001:db8::50/128]"
+	if len(withSrc) != 2 || withSrc[0] != want || withSrc[1] != want {
+		t.Fatalf("источники маршрута и правила: %v, ожидалось %s дважды\n%s", withSrc, want, data)
 	}
 }

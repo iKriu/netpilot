@@ -34,7 +34,7 @@ func TestAutoGroupsConcurrent(t *testing.T) {
 	var mu sync.Mutex
 	calls := map[string]int{}
 	selected := map[string]string{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withSecret(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/proxies/")
 		if tag, ok := strings.CutSuffix(path, "/delay"); ok {
 			mu.Lock()
@@ -51,10 +51,10 @@ func TestAutoGroupsConcurrent(t *testing.T) {
 		mu.Lock()
 		selected[path] = body.Name
 		mu.Unlock()
-	}))
+	})))
 	defer srv.Close()
 	defer unblock() // до srv.Close: сервер ждёт завершения обработчиков
-	api := strings.TrimPrefix(srv.URL, "http://")
+	api := testClash(srv)
 
 	a := &App{DataDir: t.TempDir()}
 	groups := []autoGroupInfo{

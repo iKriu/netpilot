@@ -3,6 +3,8 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -91,7 +94,29 @@ func New(dataDir string) (*App, error) {
 }
 
 func (a *App) env() core.Env {
-	return core.Env{DataDir: a.DataDir, OS: runtime.GOOS, ListsDir: a.listsDir(), Selected: a.autoSelected()}
+	return core.Env{DataDir: a.DataDir, OS: runtime.GOOS, ListsDir: a.listsDir(), Selected: a.autoSelected(), DeviceIPv6: a.allIPv6()}
+}
+
+// allIPv6 — копия IPv6-адресов устройств: окружение ядра живёт дольше
+// блокировки, а таблица соседей обновляется сканированием параллельно.
+func (a *App) allIPv6() map[string][]string {
+	a.net.mu.Lock()
+	defer a.net.mu.Unlock()
+	if len(a.net.v6) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(a.net.v6))
+	for id, addrs := range a.net.v6 {
+		out[id] = slices.Clone(addrs)
+	}
+	return out
+}
+
+// clashSecret — случайный ключ Clash API на один запуск ядра.
+func clashSecret() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b) // crypto/rand.Read не возвращает ошибок
+	return hex.EncodeToString(b)
 }
 
 // Changed отмечает, что есть неприменённые изменения.
@@ -140,7 +165,7 @@ func (a *App) startLocked() error {
 	}
 	env := a.env()
 	if addr, err := freeLocalAddr(); err == nil {
-		env.ClashAddr = addr
+		env.ClashAddr, env.ClashSecret = addr, clashSecret()
 	}
 	if err := choice.Core.Start(core.WithoutUnsupported(cfg, choice.Issues), env); err != nil {
 		a.lastErr = err.Error()
@@ -223,7 +248,7 @@ func (a *App) reloadLocked() error {
 	}
 	env := a.env()
 	if addr, err := freeLocalAddr(); err == nil {
-		env.ClashAddr = addr
+		env.ClashAddr, env.ClashSecret = addr, clashSecret()
 	}
 	if err := r.Reload(core.WithoutUnsupported(cfg, choice.Issues), env); err != nil {
 		return err
@@ -329,7 +354,7 @@ type Latency struct {
 func (a *App) TestNodes(ctx context.Context, ids []string) []Latency {
 	cfg := a.Store.Get()
 	a.mu.Lock()
-	clash := ""
+	var clash core.Clash
 	if a.active != nil && !a.dirty {
 		clash = a.active.ClashAPI()
 	}
@@ -337,7 +362,7 @@ func (a *App) TestNodes(ctx context.Context, ids []string) []Latency {
 	method := cfg.Settings.PingMethod
 	if method == "" || method == PingAuto {
 		method = PingTCP
-		if clash != "" {
+		if clash.Addr != "" {
 			method = PingHTTP
 		}
 	}
@@ -359,7 +384,7 @@ func (a *App) TestNodes(ctx context.Context, ids []string) []Latency {
 		var l Latency
 		switch method {
 		case PingHTTP:
-			if clash == "" {
+			if clash.Addr == "" {
 				l = Latency{ID: n.ID, Ms: -1, Method: PingHTTP, Error: "запустите шлюз: проверка идёт через ядро"}
 			} else {
 				l = clashDelay(ctx, clash, n.ID, cfg.Settings.TestURL, 5000)
@@ -379,14 +404,18 @@ func (a *App) TestNodes(ctx context.Context, ids []string) []Latency {
 	return out
 }
 
-func clashDelay(ctx context.Context, api, id, testURL string, timeoutMs int) Latency {
+func clashDelay(ctx context.Context, api core.Clash, id, testURL string, timeoutMs int) Latency {
 	res := Latency{ID: id, Ms: -1, Method: "http"}
 	if testURL == "" {
 		testURL = "https://www.gstatic.com/generate_204"
 	}
-	u := fmt.Sprintf("http://%s/proxies/%s/delay?timeout=%d&url=%s",
-		api, url.PathEscape(singboxNodeTag(id)), timeoutMs, url.QueryEscape(testURL))
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	path := fmt.Sprintf("/proxies/%s/delay?timeout=%d&url=%s",
+		url.PathEscape(singboxNodeTag(id)), timeoutMs, url.QueryEscape(testURL))
+	req, err := api.Request(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		res.Error = err.Error()
+		return res
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		res.Error = err.Error()

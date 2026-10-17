@@ -146,10 +146,11 @@ func BuildPlan(cfg *model.Config, env Env) (*Plan, error) {
 
 	// Маршруты устройств важнее правил.
 	for _, d := range cfg.Devices {
-		if d.IP == "" || (d.Route != "proxy" && d.Route != "direct" && d.Route != "block") {
+		src := DeviceSources(d, env)
+		if len(src) == 0 || (d.Route != "proxy" && d.Route != "direct" && d.Route != "block") {
 			continue
 		}
-		r := PlanRule{Sources: []string{toCIDR(d.IP)}, Action: d.Route}
+		r := PlanRule{Sources: src, Action: d.Route}
 		if d.Route == "proxy" {
 			r.Target = target(d.RouteTarget)
 		}
@@ -160,7 +161,7 @@ func BuildPlan(cfg *model.Config, env Env) (*Plan, error) {
 		if !rule.Enabled {
 			continue
 		}
-		r, ok := planRule(cfg, rule, env.ListsDir)
+		r, ok := planRule(cfg, rule, env)
 		if !ok {
 			continue
 		}
@@ -172,22 +173,19 @@ func BuildPlan(cfg *model.Config, env Env) (*Plan, error) {
 	return p, nil
 }
 
-func planRule(cfg *model.Config, rule model.Rule, listsDir string) (PlanRule, bool) {
+func planRule(cfg *model.Config, rule model.Rule, env Env) (PlanRule, bool) {
 	r := PlanRule{Action: rule.Where.Action}
 	if r.Action != "direct" && r.Action != "block" {
 		r.Action = "proxy"
 	}
 	if w := rule.Who; len(w.DeviceIDs)+len(w.Tags)+len(w.CIDRs) > 0 {
 		for _, d := range cfg.Devices {
-			if d.IP == "" {
-				continue
-			}
 			tagged := false
 			for _, t := range d.Tags {
 				tagged = tagged || slices.Contains(w.Tags, t)
 			}
 			if slices.Contains(w.DeviceIDs, d.ID) || tagged {
-				r.Sources = append(r.Sources, toCIDR(d.IP))
+				r.Sources = append(r.Sources, DeviceSources(d, env)...)
 			}
 		}
 		for _, c := range w.CIDRs {
@@ -254,8 +252,8 @@ func planRule(cfg *model.Config, rule model.Rule, listsDir string) (PlanRule, bo
 	found := 0
 	for _, id := range w.Lists {
 		l, ok := lists.Get(id)
-		path := lists.TextPath(listsDir, id)
-		if !ok || listsDir == "" || !lists.Ready(path) {
+		path := lists.TextPath(env.ListsDir, id)
+		if !ok || env.ListsDir == "" || !lists.Ready(path) {
 			continue
 		}
 		found++
@@ -335,6 +333,26 @@ func GroupNodes(cfg *model.Config, g model.Group) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// DeviceSources — адреса, с которых приходит трафик устройства: IPv4 из
+// настроек и IPv6 из таблицы соседей (/128). Без IPv6 трафик устройства по
+// IPv6 в прозрачном режиме шёл бы мимо его маршрута и правил. Локальные
+// адреса (fe80::/10) из сети не выходят и ядру не нужны; неверные
+// пропускаются — один такой сломал бы правило целиком.
+func DeviceSources(d model.Device, env Env) []string {
+	var out []string
+	if d.IP != "" {
+		out = append(out, toCIDR(d.IP))
+	}
+	for _, s := range env.DeviceIPv6[d.ID] {
+		a, err := netip.ParseAddr(strings.TrimSpace(s))
+		if err != nil || !a.Is6() || a.Is4In6() || a.Zone() != "" || a.IsLinkLocalUnicast() {
+			continue
+		}
+		out = append(out, netip.PrefixFrom(a, 128).String())
+	}
+	return out
 }
 
 func toCIDR(s string) string {

@@ -63,9 +63,9 @@ func (f *fakeClash) set(tag string, ms int) {
 
 func TestAutoSwitch(t *testing.T) {
 	fc := &fakeClash{delay: map[string]int{"node-a": 300, "node-b": 80, "node-c": 150, "node-d": -1}, selected: map[string]string{}}
-	srv := httptest.NewServer(fc)
+	srv := httptest.NewServer(withSecret(t, fc))
 	defer srv.Close()
-	api := strings.TrimPrefix(srv.URL, "http://")
+	api := testClash(srv)
 
 	a := &App{DataDir: t.TempDir()}
 	g := autoGroupInfo{Tag: "group-eu", Name: "Европа", Members: []string{"a", "b", "c", "d"}, InUse: true}

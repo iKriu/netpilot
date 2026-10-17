@@ -72,3 +72,27 @@ func TestCheckReportsUnsafeValues(t *testing.T) {
 		t.Fatalf("правила:\n%s", all)
 	}
 }
+
+// Ключ Clash API и IPv6-адреса устройств попадают в конфиг mihomo.
+func TestRenderSecretAndDeviceIPv6(t *testing.T) {
+	cfg := model.Defaults()
+	cfg.Devices = []model.Device{{ID: "tv", IP: "192.168.1.50", Route: "direct"}}
+	env := core.Env{OS: "linux", ClashAddr: "127.0.0.1:9090", ClashSecret: "s3", DeviceIPv6: map[string][]string{"tv": {"2001:db8::50"}}}
+	data, err := New(t.TempDir()).Render(cfg, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var conf struct {
+		Secret string   `json:"secret"`
+		Rules  []string `json:"rules"`
+	}
+	if err := json.Unmarshal(data, &conf); err != nil {
+		t.Fatal(err)
+	}
+	if conf.Secret != "s3" {
+		t.Errorf("ключ API: %q", conf.Secret)
+	}
+	if all := strings.Join(conf.Rules, "\n"); !strings.Contains(all, "SRC-IP-CIDR,2001:db8::50/128") {
+		t.Errorf("нет IPv6-адреса устройства в правилах:\n%s", all)
+	}
+}

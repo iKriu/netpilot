@@ -17,10 +17,30 @@ import (
 // fakeClashCore — ядро, у которого есть только адрес Clash API.
 type fakeClashCore struct {
 	core.Core
-	api string
+	api core.Clash
 }
 
-func (f *fakeClashCore) ClashAPI() string { return f.api }
+func (f *fakeClashCore) ClashAPI() core.Clash { return f.api }
+
+const testSecret = "test-secret"
+
+// withSecret — поддельный Clash API, который, как настоящий, без ключа
+// отвечает 401: так тесты ловят запрос, забывший заголовок.
+func withSecret(t *testing.T, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+testSecret {
+			t.Errorf("%s %s без ключа API", r.Method, r.URL.Path)
+			http.Error(w, `{"message":"Unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
+// testClash — адрес тестового сервера с ключом.
+func testClash(srv *httptest.Server) core.Clash {
+	return core.Clash{Addr: strings.TrimPrefix(srv.URL, "http://"), Secret: testSecret}
+}
 
 type connRec struct {
 	id, src, chain string
@@ -70,14 +90,14 @@ func (f *fakeConns) set(up, down int64, conns ...connRec) {
 }
 
 func newTrafficApp(t *testing.T, f *fakeConns) *App {
-	srv := httptest.NewServer(f)
+	srv := httptest.NewServer(withSecret(t, f))
 	t.Cleanup(srv.Close)
 	dir := t.TempDir()
 	st, err := store.Open(dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &App{Store: st, DataDir: dir, active: &fakeClashCore{api: strings.TrimPrefix(srv.URL, "http://")}}
+	return &App{Store: st, DataDir: dir, active: &fakeClashCore{api: testClash(srv)}}
 }
 
 func checkStatsConsistent(t *testing.T, a *App) DayStats {

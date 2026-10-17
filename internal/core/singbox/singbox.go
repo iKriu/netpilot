@@ -28,7 +28,7 @@ type Core struct {
 	mu     sync.Mutex
 	box    *box.Box
 	cancel context.CancelFunc
-	clash  string
+	clash  core.Clash
 	gen    int // номер экземпляра: у соседних разные файлы кэша
 	// stopTrim останавливает слежение за размером журнала.
 	stopTrim chan struct{}
@@ -97,7 +97,7 @@ func (c *Core) Start(cfg *model.Config, env core.Env) error {
 	if err != nil {
 		return err
 	}
-	c.box, c.cancel, c.clash = instance, cancel, env.ClashAddr
+	c.box, c.cancel, c.clash = instance, cancel, core.Clash{Addr: env.ClashAddr, Secret: env.ClashSecret}
 	c.stopTrim = make(chan struct{})
 	go trimLog(logPath, c.stopTrim)
 	return nil
@@ -144,7 +144,7 @@ func (c *Core) Reload(cfg *model.Config, env core.Env) error {
 		return err
 	}
 	old, oldCancel := c.box, c.cancel
-	c.box, c.cancel, c.clash = instance, cancel, env.ClashAddr
+	c.box, c.cancel, c.clash = instance, cancel, core.Clash{Addr: env.ClashAddr, Secret: env.ClashSecret}
 	c.gen++
 	// «Осушение»: у старого экземпляра закрываем только входы — новые
 	// подключения теперь получает лишь новый, а начатые спокойно доработают.
@@ -218,7 +218,7 @@ func (c *Core) Stop() error {
 	}
 	err := c.box.Close()
 	c.cancel()
-	c.box, c.cancel, c.clash = nil, nil, ""
+	c.box, c.cancel, c.clash = nil, nil, core.Clash{}
 	return err
 }
 
@@ -228,7 +228,7 @@ func (c *Core) Running() bool {
 	return c.box != nil
 }
 
-func (c *Core) ClashAPI() string {
+func (c *Core) ClashAPI() core.Clash {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.clash

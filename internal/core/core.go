@@ -17,11 +17,17 @@ type Env struct {
 	DataDir   string
 	OS        string
 	ClashAddr string // куда ядру повесить Clash API ("" — не включать)
-	CacheFile string // имя файла кэша (при перезагрузке старый экземпляр ещё держит прежний)
-	ListsDir  string // скачанные списки (Re:filter и др.)
+	// ClashSecret — ключ Clash API, новый при каждом запуске ядра.
+	ClashSecret string
+	CacheFile   string // имя файла кэша (при перезагрузке старый экземпляр ещё держит прежний)
+	ListsDir    string // скачанные списки (Re:filter и др.)
 	// Selected — какой сервер сейчас выбран в автоматических группах:
 	// тег группы → тег сервера. Выбирает NetPilot (см. app/autoswitch.go).
 	Selected map[string]string
+	// DeviceIPv6 — IPv6-адреса устройств (id → адреса), замеченные в сети.
+	// В прозрачном режиме с перехватом IPv6 трафик устройства приходит и с
+	// них, и маршрут устройства должен действовать на него так же, как на IPv4.
+	DeviceIPv6 map[string][]string
 	// Compat113 — конфиг для sing-box 1.13 (на нём собран Hiddify Core):
 	// без полей, появившихся в 1.14.
 	Compat113 bool
@@ -82,8 +88,9 @@ type Core interface {
 	Start(cfg *model.Config, env Env) error
 	Stop() error
 	Running() bool
-	// ClashAPI — адрес Clash-совместимого API ядра (задержки, соединения) или "".
-	ClashAPI() string
+	// ClashAPI — адрес и ключ Clash-совместимого API ядра (задержки,
+	// соединения); пустой Addr — API нет.
+	ClashAPI() Clash
 }
 
 // Validate проверяет, всё ли из конфигурации поддерживает ядро.
