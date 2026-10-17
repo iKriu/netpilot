@@ -120,6 +120,9 @@ export { coreButton };
 function stateChip() {
   const s = state.status;
   if (!s) return h('span', { class: 'state off' }, h('span', { class: 'dot' }), '…');
+  // Ядро упало, и сторож перезапускает его сам: это не остановка и ещё не ошибка.
+  // Отдельного класса .state.warn в стилях нет — цвета предупреждения задаём здесь.
+  if (s.restarting) return h('span', { class: 'state', style: 'background:var(--warns);color:var(--warn)', title: s.error || '' }, h('span', { class: 'dot warn' }), h('span', { class: 'lbl-long' }, 'Ядро перезапускается…'), h('span', { class: 'lbl-short' }, 'Перезапуск…'));
   if (s.running) return h('span', { class: 'state', title: `${s.core} ${s.coreVersion || ''}` }, h('span', { class: 'dot ok' }), h('span', { class: 'lbl-long' }, 'Шлюз работает'), h('span', { class: 'lbl-short' }, 'Работает'), h('span', { class: 'lbl-long' }, ' · ' + uptime(s.startedAt)));
   if (s.error) return h('span', { class: 'state bad', title: s.error }, h('span', { class: 'dot bad' }), 'Ошибка ядра');
   return h('span', { class: 'state off' }, h('span', { class: 'dot' }), h('span', { class: 'lbl-long' }, 'Шлюз остановлен'), h('span', { class: 'lbl-short' }, 'Остановлен'));

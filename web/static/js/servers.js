@@ -8,6 +8,27 @@ import {
 } from './core.js';
 import { refreshActive } from './app.js';
 
+// removeChecked удаляет сервер, группу или подписку. Если объект где-то выбран,
+// API отвечает 409 со списком мест; тогда показываем его и удаляем только после
+// второго подтверждения (?force=1) — сервер сам переключит эти места на «по умолчанию».
+async function removeChecked(method, path, done) {
+  try {
+    await api(method, path);
+  } catch (e) {
+    if (e.status !== 409) throw e;
+    modal({
+      title: 'Используется',
+      body: h('div', {},
+        h('p', { style: 'margin:0 0 8px' }, 'Удаляемое выбрано здесь:'),
+        h('ul', { style: 'margin:0 0 8px;padding-left:20px' }, arr(e.data && e.data.references).map(r => h('li', {}, r))),
+        h('p', { class: 'hint', style: 'margin:0' }, 'После удаления эти правила, устройства и настройки пойдут через сервер по умолчанию, а из групп удалённое исчезнет.')),
+      actions: [{ label: 'Удалить всё равно', danger: true, onClick: async () => { await api(method, path + '?force=1'); await done(); } }],
+    });
+    return;
+  }
+  await done();
+}
+
 // ---------- выбор активного сервера ----------
 
 // openPicker — окно «Активный сервер»: группы, быстрые серверы, все серверы.
@@ -170,7 +191,7 @@ export async function pageServers() {
         h('span', { class: 'col', style: 'display:flex;gap:2px' },
           h('button', { class: 'ib', 'aria-label': 'Проверить', title: 'Проверить', onclick: () => testOne(n.id) }, icon('test', 's')),
           h('button', { class: 'ib hide-m', 'aria-label': 'Изменить', title: 'Изменить', onclick: () => editNode(n) }, icon('edit', 's')),
-          h('button', { class: 'ib danger hide-m', 'aria-label': 'Удалить', title: 'Удалить', onclick: () => confirmModal(`Удалить сервер «${n.name}»?`, async () => { await api('DELETE', '/nodes/' + n.id); state.refreshCounts && state.refreshCounts(); route(); }) }, icon('trash', 's'))))),
+          h('button', { class: 'ib danger hide-m', 'aria-label': 'Удалить', title: 'Удалить', onclick: () => confirmModal(`Удалить сервер «${n.name}»?`, () => removeChecked('DELETE', '/nodes/' + n.id, () => { state.refreshCounts && state.refreshCounts(); refreshActive(); route(); })) }, icon('trash', 's'))))),
       vs.length > shown && h('button', { class: 'row', style: 'width:100%;border-left:0;border-right:0;border-bottom:0;background:transparent;justify-content:center;color:var(--acc2);font-weight:600', onclick: () => { shown += 200; drawList(); } }, `Показать ещё ${Math.min(200, vs.length - shown)} из ${vs.length - shown}`),
     ] : [empty('servers', nodes.length ? 'Ничего не найдено' : 'Серверов нет', nodes.length ? 'Измените фильтр или поиск.' : 'Импортируйте ссылки или добавьте подписку провайдера.',
       !nodes.length && h('button', { class: 'btn p', onclick: importModal }, icon('import', 's'), 'Добавить серверы'))]));
@@ -222,7 +243,7 @@ export async function pageServers() {
     h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' },
       h('button', { class: 'btn sm', onclick: async e => { e.currentTarget.classList.add('busy'); await updateSub(s.id); route(); } }, icon('refresh', 's'), 'Обновить'),
       h('button', { class: 'btn sm g', onclick: () => subModal(s) }, 'Изменить'),
-      h('button', { class: 'btn sm g', style: 'color:var(--bad)', onclick: () => confirmModal(`Удалить подписку «${s.name}» вместе с её серверами?`, async () => { await api('POST', `/subscriptions/${s.id}/purge`); route(); }) }, 'Удалить')));
+      h('button', { class: 'btn sm g', style: 'color:var(--bad)', onclick: () => confirmModal(`Удалить подписку «${s.name}» вместе с её серверами?`, () => removeChecked('POST', `/subscriptions/${s.id}/purge`, () => { refreshActive(); route(); })) }, 'Удалить')));
 
   const updateSub = async id => {
     try { const r = await api('POST', `/subscriptions/${id}/update`); toast(`Загружено серверов: ${r.nodes}`, 'ok', { title: 'Подписка обновлена' }); }
@@ -382,20 +403,14 @@ export async function pageServers() {
     setTimeout(() => search.focus(), 50);
   }
 
-  // Удаление группы: предупреждаем, если она где-то используется.
-  async function deleteGroup(g) {
-    const [rules, net] = await Promise.all([get('/rules').catch(() => []), get('/network').catch(() => null)]);
-    const isActive = settings.defaultTarget === g.id;
-    const inRules = rules.filter(r => r.where && r.where.target === g.id).length;
-    const inDevs = arr(net && net.devices).filter(d => d.routeTarget === g.id).length;
-    const uses = [isActive && 'это активный сервер', inRules && `используется в правилах: ${inRules}`, inDevs && `выбрана у устройств: ${inDevs}`].filter(Boolean);
-    confirmModal(`Удалить группу «${g.name}»?` + (uses.length ? ` Сейчас ${uses.join(', ')} — после удаления этот трафик пойдёт через «Авто — все серверы».` : ''), async () => {
-      await api('DELETE', '/groups/' + g.id);
-      if (isActive) { const cur = await get('/settings'); await api('PUT', '/settings', { ...cur, defaultTarget: '' }); }
+  // Удаление группы: где она используется, сообщит API (409), а с force=1
+  // сам сбросит ссылки на неё, включая активный сервер.
+  function deleteGroup(g) {
+    confirmModal(`Удалить группу «${g.name}»?`, () => removeChecked('DELETE', '/groups/' + g.id, () => {
       document.querySelectorAll('#modal-root .modal-bg').forEach(m => m.remove());
       refreshActive();
       route();
-    });
+    }));
   }
 
   // Выбор сервера внутри группы: у ручной — единственный способ, у автоматической

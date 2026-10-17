@@ -128,7 +128,13 @@ export async function api(method, path, body) {
     if (onAuthLost.fn) onAuthLost.fn();
     throw new Error('Требуется вход');
   }
-  if (!res.ok) throw new Error((data && data.error) || res.statusText);
+  if (!res.ok) {
+    // Код и тело ответа — для случаев, где ошибку разбирают (409 со списком ссылок).
+    const err = new Error((data && data.error) || res.statusText);
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
   // Сохранённое человеком (кнопкой, окном, удалением) применяется к ядру.
   if (method !== 'GET' && !/^\/(core|auth|nodes\/test|network\/scan|lists|router|backup|restore|update|devices\/cleanup)/.test(path)) scheduleApply();
   return data;

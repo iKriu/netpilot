@@ -70,8 +70,8 @@ func New(a *app.App, au *auth.Auth, upd *update.Updater, static fs.FS) http.Hand
 		if !decode(w, r, &in) {
 			return
 		}
-		if in.MixedPort <= 0 || in.MixedPort > 65535 {
-			reply(w, nil, errors.New("неверный порт прокси"))
+		if err := model.ValidateSettings(&in); err != nil {
+			reply(w, nil, err)
 			return
 		}
 		err := a.Store.Update(func(c *model.Config) error { c.Settings = in; return nil })
@@ -82,15 +82,24 @@ func New(a *app.App, au *auth.Auth, upd *update.Updater, static fs.FS) http.Hand
 	})
 
 	collection(s, "nodes", func(c *model.Config) *[]model.Node { return &c.Nodes },
-		func(n *model.Node) *string { return &n.ID }, nil, a.Changed)
+		func(n *model.Node) *string { return &n.ID }, model.ValidateNode,
+		detachHook("сервер"), a.Changed)
+	// CheckGroup приводит группу к нормальному виду (обрезает имя, тип по умолчанию),
+	// ValidateGroup — общая проверка модели, та же, что при восстановлении копии.
 	collection(s, "groups", func(c *model.Config) *[]model.Group { return &c.Groups },
-		func(g *model.Group) *string { return &g.ID }, core.CheckGroup, a.Changed)
+		func(g *model.Group) *string { return &g.ID }, func(g *model.Group) error {
+			if err := core.CheckGroup(g); err != nil {
+				return err
+			}
+			return model.ValidateGroup(g)
+		},
+		detachHook("группа"), a.Changed)
 	collection(s, "rules", func(c *model.Config) *[]model.Rule { return &c.Rules },
-		func(r *model.Rule) *string { return &r.ID }, nil, a.Changed)
+		func(r *model.Rule) *string { return &r.ID }, model.ValidateRule, nil, a.Changed)
 	collection(s, "devices", func(c *model.Config) *[]model.Device { return &c.Devices },
-		func(d *model.Device) *string { return &d.ID }, nil, a.DevicesChanged)
+		func(d *model.Device) *string { return &d.ID }, model.ValidateDevice, nil, a.DevicesChanged)
 	collection(s, "subscriptions", func(c *model.Config) *[]model.Subscription { return &c.Subscriptions },
-		func(sub *model.Subscription) *string { return &sub.ID }, nil, func() {}) // на маршрутизацию не влияют
+		func(sub *model.Subscription) *string { return &sub.ID }, model.ValidateSubscription, nil, func() {}) // на маршрутизацию не влияют
 
 	// Сервер в группе с ручным выбором.
 	m.HandleFunc("POST /api/groups/{id}/select", func(w http.ResponseWriter, r *http.Request) {
@@ -210,6 +219,11 @@ func New(a *app.App, au *auth.Auth, upd *update.Updater, static fs.FS) http.Hand
 			return
 		}
 		err := a.Store.Update(func(c *model.Config) error {
+			// Цель маршрута проверяем по текущей конфигурации: сервер или группа
+			// могли быть удалены, пока страница была открыта.
+			if in.RouteTarget != nil && *in.RouteTarget != "" && !targetExists(c, *in.RouteTarget) {
+				return errors.New("выбранный сервер или группа не найдены, обновите страницу")
+			}
 			for i := range c.Devices {
 				d := &c.Devices[i]
 				if !slices.Contains(in.IDs, d.ID) {
@@ -223,6 +237,10 @@ func New(a *app.App, au *auth.Auth, upd *update.Updater, static fs.FS) http.Hand
 				}
 				if in.Pinned != nil && d.IP != "" {
 					d.Pinned = *in.Pinned
+				}
+				// Ошибка отменяет всё изменение: Update не сохраняет копию.
+				if err := model.ValidateDevice(d); err != nil {
+					return err
 				}
 			}
 			return nil
@@ -256,10 +274,19 @@ func New(a *app.App, au *auth.Auth, upd *update.Updater, static fs.FS) http.Hand
 		n, changed, err := a.UpdateSubscription(r.Context(), r.PathValue("id"))
 		reply(w, map[string]any{"nodes": n, "changed": changed}, err)
 	})
-	// Удаление подписки удаляет и её узлы.
+	// Удаление подписки удаляет и её узлы — с той же проверкой ссылок, что у сервера.
 	m.HandleFunc("POST /api/subscriptions/{id}/purge", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		err := a.Store.Update(func(c *model.Config) error {
+			var ids []string
+			for _, n := range c.Nodes {
+				if n.SubscriptionID == id {
+					ids = append(ids, n.ID)
+				}
+			}
+			if err := detach(c, ids, "серверы подписки", forced(r)); err != nil {
+				return err
+			}
 			c.Nodes = slices.DeleteFunc(c.Nodes, func(n model.Node) bool { return n.SubscriptionID == id })
 			c.Subscriptions = slices.DeleteFunc(c.Subscriptions, func(s model.Subscription) bool { return s.ID == id })
 			return nil
@@ -324,7 +351,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // collection регистрирует CRUD для списка объектов с полем ID.
 // check (может быть nil) проверяет объект перед сохранением.
-func collection[T any](s *Server, name string, list func(*model.Config) *[]T, idOf func(*T) *string, check func(*T) error, changed func()) {
+// beforeDelete (может быть nil) вызывается внутри Update перед удалением:
+// может запретить удаление или поправить ссылки на объект; force — ?force=1.
+func collection[T any](s *Server, name string, list func(*model.Config) *[]T, idOf func(*T) *string, check func(*T) error,
+	beforeDelete func(c *model.Config, id string, force bool) error, changed func()) {
 	a := s.app
 	base := "/api/" + name
 	find := func(items []T, id string) int {
@@ -393,6 +423,11 @@ func collection[T any](s *Server, name string, list func(*model.Config) *[]T, id
 			if i < 0 {
 				return errNotFound
 			}
+			if beforeDelete != nil {
+				if err := beforeDelete(c, id, forced(r)); err != nil {
+					return err
+				}
+			}
 			*list(c) = slices.Delete(*list(c), i, i+1)
 			return nil
 		})
@@ -404,6 +439,72 @@ func collection[T any](s *Server, name string, list func(*model.Config) *[]T, id
 }
 
 var errNotFound = errors.New("не найдено")
+
+// inUseError — удаляемый объект где-то используется. Отвечаем 409 со списком
+// мест: интерфейс показывает его и повторяет запрос с ?force=1.
+type inUseError struct {
+	what string
+	refs []string
+}
+
+func (e *inUseError) Error() string {
+	return e.what + " используется: " + strings.Join(e.refs, ", ")
+}
+
+func forced(r *http.Request) bool { return r.URL.Query().Get("force") == "1" }
+
+func targetExists(c *model.Config, id string) bool {
+	return slices.ContainsFunc(c.Nodes, func(n model.Node) bool { return n.ID == id }) ||
+		slices.ContainsFunc(c.Groups, func(g model.Group) bool { return g.ID == id })
+}
+
+// detach готовит удаление узлов или групп ids. Без force при наличии ссылок
+// возвращает inUseError. С force убирает ссылки, чтобы в конфигурации не
+// осталось висячих id: из составов групп id просто исключается, а правила,
+// устройства и сервер по умолчанию получают "" — то есть «прокси по умолчанию»,
+// как если бы цель не выбирали вовсе.
+// detachHook — detach для одного объекта, в форме beforeDelete у collection.
+func detachHook(what string) func(*model.Config, string, bool) error {
+	return func(c *model.Config, id string, force bool) error { return detach(c, []string{id}, what, force) }
+}
+
+func detach(c *model.Config, ids []string, what string, force bool) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if !force {
+		var refs []string
+		for _, id := range ids {
+			for _, ref := range model.References(c, id) {
+				if !slices.Contains(refs, ref) { // группа с несколькими серверами подписки — одна строка
+					refs = append(refs, ref)
+				}
+			}
+		}
+		if len(refs) > 0 {
+			return &inUseError{what: what, refs: refs}
+		}
+		return nil
+	}
+	gone := func(id string) bool { return slices.Contains(ids, id) }
+	if gone(c.Settings.DefaultTarget) {
+		c.Settings.DefaultTarget = ""
+	}
+	for i := range c.Rules {
+		if gone(c.Rules[i].Where.Target) {
+			c.Rules[i].Where.Target = ""
+		}
+	}
+	for i := range c.Devices {
+		if gone(c.Devices[i].RouteTarget) {
+			c.Devices[i].RouteTarget = ""
+		}
+	}
+	for i := range c.Groups {
+		c.Groups[i].NodeIDs = slices.DeleteFunc(c.Groups[i].NodeIDs, gone)
+	}
+	return nil
+}
 
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<20)
@@ -423,6 +524,12 @@ func replyStatus(w http.ResponseWriter, status int, err error) {
 func reply(w http.ResponseWriter, data any, err error) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err != nil {
+		var inUse *inUseError
+		if errors.As(err, &inUse) {
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error(), "references": inUse.refs})
+			return
+		}
 		status := http.StatusBadRequest
 		if errors.Is(err, errNotFound) {
 			status = http.StatusNotFound
