@@ -89,8 +89,7 @@ func (c *Core) Start(cfg *model.Config, env core.Env) error {
 		return errors.New("ядро уже запущено")
 	}
 	logPath := filepath.Join(env.DataDir, "core.log")
-	_ = os.Remove(logPath)
-	_ = os.Remove(logPath + ".1")
+	logfile.KeepPrevious(logPath) // журнал прошлого запуска — в core.log.1
 	c.gen = 0
 	env.CacheFile = "cache-0.db"
 	instance, cancel, err := build(cfg, env)

@@ -75,3 +75,38 @@ func TestIPv6(t *testing.T) {
 		t.Error("режим off не должен создавать таблицу IPv6")
 	}
 }
+
+func TestDNSFallbackRuleset(t *testing.T) {
+	s, err := DNSFallbackRuleset("192.168.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"add table ip " + DNSFallbackTable, "delete table ip " + DNSFallbackTable,
+		"fib daddr type local meta l4proto { tcp, udp } th dport 53 dnat to 192.168.0.1:53",
+		"ip daddr 192.168.0.1 meta l4proto { tcp, udp } th dport 53 masquerade",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("нет %q в:\n%s", want, s)
+		}
+	}
+	for _, bad := range []string{"", "127.0.0.53\n", "::1", "1.2.3.4; drop"} {
+		if _, err := DNSFallbackRuleset(bad); err == nil {
+			t.Errorf("адрес %q должен отклоняться", bad)
+		}
+	}
+}
+
+func TestFirstNameserver(t *testing.T) {
+	cases := map[string]string{
+		"nameserver 127.0.0.53\noptions edns0\n":                   "",
+		"# от systemd\nnameserver 192.168.0.1\nnameserver 8.8.8.8": "192.168.0.1",
+		"nameserver fe80::1\nnameserver 77.88.8.8\n":               "77.88.8.8",
+		"search lan\n": "",
+	}
+	for in, want := range cases {
+		if got := firstNameserver(in); got != want {
+			t.Errorf("%q: %q, ожидался %q", in, got, want)
+		}
+	}
+}

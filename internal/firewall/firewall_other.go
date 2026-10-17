@@ -13,3 +13,7 @@ func Check() Status {
 func Apply(Spec) error { return errUnsupported }
 
 func Remove() error { return nil }
+
+func DNSFallback(string) error { return nil }
+
+func SystemDNS() string { return "" }

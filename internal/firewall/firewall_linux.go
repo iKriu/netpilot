@@ -72,6 +72,47 @@ func Remove() error {
 	return errors.Join(errs...)
 }
 
+// DNSFallback включает (upstream != "") или выключает (upstream == "")
+// пересылку DNS устройств на upstream, пока ядро прокси не работает.
+func DNSFallback(upstream string) error {
+	if upstream == "" {
+		if exec.Command("nft", "list", "table", "ip", DNSFallbackTable).Run() != nil {
+			return nil
+		}
+		if out, err := exec.Command("nft", "delete", "table", "ip", DNSFallbackTable).CombinedOutput(); err != nil {
+			return fmt.Errorf("nftables: %v: %s", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+	script, err := DNSFallbackRuleset(upstream)
+	if err != nil {
+		return err
+	}
+	gatewaySysctls()
+	cmd := exec.Command("nft", "-f", "-")
+	cmd.Stdin = strings.NewReader(script)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("nftables: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// SystemDNS — DNS-сервер, которым пользуется сама система (роутер или
+// провайдер): у systemd-resolved настоящие серверы — в /run/systemd/resolve,
+// в /etc/resolv.conf там заглушка 127.0.0.53. "" — не найден.
+func SystemDNS() string {
+	for _, f := range []string{"/run/systemd/resolve/resolv.conf", "/etc/resolv.conf"} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		if ip := firstNameserver(string(b)); ip != "" {
+			return ip
+		}
+	}
+	return ""
+}
+
 // gatewaySysctls — настройки ядра для шлюза. Ошибки не критичны (в контейнере
 // /proc/sys может быть только для чтения — там их задаёт docker через sysctls).
 //   - пересылка пакетов: без неё устройства не выйдут в интернет;

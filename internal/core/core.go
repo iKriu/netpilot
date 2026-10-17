@@ -28,9 +28,24 @@ type Env struct {
 	// В прозрачном режиме с перехватом IPv6 трафик устройства приходит и с
 	// них, и маршрут устройства должен действовать на него так же, как на IPv4.
 	DeviceIPv6 map[string][]string
+	// DNSDirect — прямой DNS, выбранный NetPilot, когда в настройках «auto»
+	// (см. model.DirectDNSAuto). "" — первый из списка.
+	DNSDirect string
 	// Compat113 — конфиг для sing-box 1.13 (на нём собран Hiddify Core):
 	// без полей, появившихся в 1.14.
 	Compat113 bool
+}
+
+// DirectDNS — прямой DNS для конфига ядра: выбранный человеком или, при
+// «auto», тот, что выбрал NetPilot (по умолчанию — первый по приоритету).
+func DirectDNS(s model.Settings, env Env) string {
+	if s.DNSDirect != model.DNSAuto {
+		return s.DNSDirect
+	}
+	if env.DNSDirect != "" {
+		return env.DNSDirect
+	}
+	return model.DirectDNSAuto[0]
 }
 
 // Reloader — ядро, которое умеет применить новую конфигурацию без остановки:

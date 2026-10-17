@@ -9,7 +9,7 @@ import (
 // SchemaVersion — версия формата файла конфигурации. Увеличивается, когда
 // поле переименовывается, меняет смысл или тип: простое добавление поля
 // версии не требует (новые поля получают значения из Defaults).
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // Migration переводит сырой JSON конфигурации с версии N на N+1.
 // Работает с картой, а не с Config: переименованное поле в структуре уже
@@ -20,6 +20,15 @@ type Migration func(raw map[string]any) error
 var migrations = []Migration{
 	// 0 → 1: файлы до появления версии. Формат не менялся — только отметка версии.
 	func(map[string]any) error { return nil },
+	// 1 → 2: прямой DNS по умолчанию стал автоматическим (зарубежные DoH,
+	// Яндекс — запасной). Прежнее значение по умолчанию переводим в auto,
+	// а выбранный человеком сервер не трогаем.
+	func(raw map[string]any) error {
+		if s, ok := raw["settings"].(map[string]any); ok && s["dnsDirect"] == "https://77.88.8.8/dns-query" {
+			s["dnsDirect"] = DNSAuto
+		}
+		return nil
+	},
 }
 
 // Migrate по очереди применяет миграции с версии from до SchemaVersion.

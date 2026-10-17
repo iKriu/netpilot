@@ -68,3 +68,16 @@ func TestMigrateJSON(t *testing.T) {
 		t.Fatal("версия новее программы принята")
 	}
 }
+
+// 1 → 2: прежний DNS по умолчанию становится auto, свой — остаётся.
+func TestMigrateDNSAuto(t *testing.T) {
+	for in, want := range map[string]string{"https://77.88.8.8/dns-query": DNSAuto, "tls://dns.google": "tls://dns.google"} {
+		raw := map[string]any{"settings": map[string]any{"dnsDirect": in}}
+		if err := Migrate(raw, 1); err != nil {
+			t.Fatal(err)
+		}
+		if got := raw["settings"].(map[string]any)["dnsDirect"]; got != want {
+			t.Errorf("%s → %v, ожидалось %s", in, got, want)
+		}
+	}
+}

@@ -206,13 +206,14 @@ func render(cfg *model.Config, plan *core.Plan, env core.Env) ([]byte, error) {
 		// пакеты адресованы чужим IP, поэтому нужен адрес «все».
 		conf["allow-lan"], conf["bind-address"] = true, "*"
 	}
+	directDNS := core.DirectDNS(s, env)
 	conf["dns"] = M{
 		"enable":             true,
 		"ipv6":               true,
-		"default-nameserver": []string{bootstrapIP(s.DNSDirect)},
-		"nameserver":         []string{dnsSpec(s.DNSDirect)},
+		"default-nameserver": []string{bootstrapIP(directDNS)},
+		"nameserver":         []string{dnsSpec(directDNS)},
 		// Адреса серверов прокси — прямым DNS, иначе запрос уйдёт в ещё не поднятый прокси.
-		"proxy-server-nameserver": []string{dnsSpec(s.DNSDirect)},
+		"proxy-server-nameserver": []string{dnsSpec(directDNS)},
 	}
 
 	var proxies []M

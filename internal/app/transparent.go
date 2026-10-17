@@ -83,6 +83,7 @@ func (a *App) applyFirewallLocked() error {
 		return err
 	}
 	a.fwErr, a.fwOn = "", true
+	a.dnsFallbackLocked(false) // DNS устройств снова отвечает ядро
 	return nil
 }
 
@@ -94,6 +95,56 @@ func (a *App) removeFirewallLocked() {
 		log.Printf("снятие перехвата: %v", err)
 	}
 	a.fwOn = false
+	a.dnsFallbackLocked(true)
+}
+
+// dnsFallbackLocked включает или выключает запасной DNS. Пока ядро не работает
+// (упало, зависло, остановлено в панели), трафик устройств после снятия
+// перехвата идёт напрямую, но DNS у них указан на шлюз — и без ядра на порту 53
+// никто не отвечает: у всей сети перестают открываться сайты. Запасной DNS
+// пересылает такие запросы туда, куда ходит сама система (роутер, провайдер).
+// В режиме роутера DNS отвечает наш dnsmasq — запасной там не нужен и мешал бы.
+func (a *App) dnsFallbackLocked(on bool) {
+	if runtime.GOOS != "linux" {
+		return
+	}
+	if !on {
+		if !a.dnsFB {
+			return
+		}
+		if err := firewall.DNSFallback(""); err != nil {
+			log.Printf("запасной DNS: %v", err)
+			return
+		}
+		a.dnsFB = false
+		log.Print("запасной DNS выключен: DNS устройств снова обслуживает ядро")
+		return
+	}
+	if !transparent(a.Store.Get().Settings) || a.routerEnabled() {
+		return
+	}
+	up := firewall.SystemDNS()
+	if up == "" {
+		log.Print("запасной DNS не включён: не найден DNS-сервер системы")
+		return
+	}
+	if err := firewall.DNSFallback(up); err != nil {
+		log.Printf("запасной DNS: %v", err)
+		return
+	}
+	a.dnsFB = true
+	log.Printf("запасной DNS включён: запросы устройств к шлюзу идут на %s", up)
+}
+
+// Shutdown — завершение программы: ядро останавливается, перехват и запасной
+// DNS снимаются. Запасной DNS без работающей программы не оставляем: правила
+// пережили бы её удаление и незаметно меняли бы DNS сети.
+func (a *App) Shutdown() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	err := a.stopLocked()
+	a.dnsFallbackLocked(false)
+	return err
 }
 
 // cleanupFirewall убирает перехват, оставшийся от аварийно завершённого запуска.
@@ -107,6 +158,7 @@ func cleanupFirewall() {
 			log.Printf("снятие перехвата: %v", err)
 		}
 	}
+	_ = firewall.DNSFallback("") // запасной DNS прошлого запуска
 }
 
 func (a *App) Transparent() TransparentView {
