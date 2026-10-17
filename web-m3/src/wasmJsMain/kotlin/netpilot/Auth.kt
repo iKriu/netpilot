@@ -29,14 +29,22 @@ fun AuthScreen(setup: Boolean) {
     var pw2 by remember { mutableStateOf("") }
     var err by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
+    // Первая настройка не с этого компьютера: сервер требует код из журнала программы.
+    var code by remember { mutableStateOf("") }
+    var needCode by remember { mutableStateOf(false) }
+    if (setup) LaunchedEffect(Unit) {
+        needCode = try { Api.obj("/auth/state").b("setupCode") } catch (e: Throwable) { false }
+    }
     val cs = MaterialTheme.colorScheme
     val submit: () -> Unit = {
         if (setup && pw != pw2) err = "Пароли не совпадают"
+        else if (setup && needCode && code.isBlank()) err = "Введите код первой настройки"
         else if (!busy) {
             busy = true; err = ""
             app.scope.launch {
                 try {
-                    Api.post(if (setup) "/auth/setup" else "/auth/login", jobj("password" to pw))
+                    val body = if (setup && needCode) jobj("password" to pw, "code" to code.trim()) else jobj("password" to pw)
+                    Api.post(if (setup) "/auth/setup" else "/auth/login", body)
                     app.auth = Auth.In
                 } catch (e: ApiError) { err = e.message ?: "Ошибка" } finally { busy = false }
             }
@@ -78,6 +86,9 @@ fun AuthScreen(setup: Boolean) {
                         )
                         if (setup) OutlinedTextField(pw2, { pw2 = it }, Modifier.fillMaxWidth(), label = { Text("Ещё раз") }, singleLine = true,
                             visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done), keyboardActions = KeyboardActions(onDone = { submit() }))
+                        if (setup && needCode) OutlinedTextField(code, { code = it }, Modifier.fillMaxWidth(), label = { Text("Код первой настройки") }, singleLine = true,
+                            placeholder = { Text("XXXX-XXXX-XXXX") }, supportingText = { Text("Код напечатан в журнале программы") },
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done), keyboardActions = KeyboardActions(onDone = { submit() }))
                         AnimatedVisibility(err.isNotEmpty()) { Text(err, color = cs.error, style = MaterialTheme.typography.bodySmall) }
                         Button(
                             onClick = submit, enabled = !busy && pw.isNotEmpty(), modifier = Modifier.fillMaxWidth().heightIn(min = ButtonDefaults.MediumContainerHeight),

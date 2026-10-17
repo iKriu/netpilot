@@ -5,12 +5,14 @@ package auth
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,6 +27,12 @@ const (
 	maxFailures = 5           // столько ошибок подряд — и адрес блокируется
 	baseLockout = time.Minute // первая блокировка; дальше вдвое дольше
 	maxLockout  = 30 * time.Minute
+
+	// Сколько адресов помним одновременно: иначе перебор со множества адресов
+	// раздувал бы таблицу без предела.
+	maxTracked = 1024
+	// Через столько после последней ошибки (и конца блокировки) адрес забываем.
+	forgetAfter = maxLockout
 )
 
 var (
@@ -32,7 +40,13 @@ var (
 	ErrWrong        = errors.New("неверный пароль")
 	ErrShort        = fmt.Errorf("пароль должен быть не короче %d символов", MinPassword)
 	ErrAlreadySetup = errors.New("пароль уже задан")
+	ErrSetupCode    = errors.New("неверный код первой настройки")
+	ErrBusy         = errors.New("предыдущая попытка ещё проверяется, повторите чуть позже")
 )
+
+// compareHash — переменная, чтобы тест мог задержать проверку пароля
+// и убедиться, что она идёт без глобальной блокировки.
+var compareHash = bcrypt.CompareHashAndPassword
 
 // LockedError — адрес временно заблокирован после серии неудачных попыток.
 type LockedError struct{ Until time.Time }
@@ -46,6 +60,13 @@ type Auth struct {
 	path     string
 	state    fileState
 	failures map[string]*attempts
+	// Адреса, чей пароль сейчас проверяется (bcrypt идёт без a.mu). Одна
+	// проверка на адрес: иначе параллельные запросы успели бы перебрать
+	// много паролей до того, как сработает блокировка.
+	checking map[string]bool
+	// Одноразовый код первой настройки для входа не с этого компьютера,
+	// нормализованный (без дефисов, в верхнем регистре). Только в памяти.
+	setupCode string
 }
 
 type fileState struct {
@@ -58,10 +79,11 @@ type attempts struct {
 	count int
 	locks int
 	until time.Time
+	last  time.Time // последняя ошибка — по ней забываем давние записи
 }
 
 func Open(dataDir string) (*Auth, error) {
-	a := &Auth{path: filepath.Join(dataDir, "auth.json"), failures: map[string]*attempts{}}
+	a := &Auth{path: filepath.Join(dataDir, "auth.json"), failures: map[string]*attempts{}, checking: map[string]bool{}}
 	a.state.Sessions = map[string]int64{}
 	data, err := os.ReadFile(a.path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -88,19 +110,103 @@ func (a *Auth) Configured() bool {
 
 // Setup задаёт первый пароль. После этого сменить его можно только зная текущий.
 func (a *Auth) Setup(password string) (string, error) {
+	if a.Configured() {
+		return "", ErrAlreadySetup
+	}
+	// bcrypt — вне блокировки: на слабом роутере это около секунды.
+	h, err := hashPassword(password)
+	if err != nil {
+		return "", err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.state.Hash != "" {
 		return "", ErrAlreadySetup
 	}
-	if err := a.setHashLocked(password); err != nil {
+	a.state.Hash = h
+	if err := a.saveLocked(); err != nil {
+		a.state.Hash = ""
 		return "", err
 	}
+	a.setupCode = "" // код одноразовый
 	return a.newSessionLocked()
 }
 
-// Login проверяет пароль и возвращает токен новой сессии.
-func (a *Auth) Login(client, password string) (string, error) {
+// SetupWithCode — первая настройка не с этого компьютера: нужен код из журнала.
+// Иначе любой в сети успел бы задать свой пароль раньше владельца.
+func (a *Auth) SetupWithCode(client, code, password string) (string, error) {
+	a.mu.Lock()
+	if at := a.failures[client]; at != nil && time.Now().Before(at.until) {
+		a.mu.Unlock()
+		return "", LockedError{at.until}
+	}
+	if a.state.Hash != "" {
+		a.mu.Unlock()
+		return "", ErrAlreadySetup
+	}
+	want := a.setupCode
+	if want == "" || subtle.ConstantTimeCompare([]byte(normalizeCode(code)), []byte(want)) != 1 {
+		a.failLocked(client)
+		a.mu.Unlock()
+		return "", ErrSetupCode
+	}
+	a.mu.Unlock()
+	return a.Setup(password)
+}
+
+// NewSetupCode создаёт одноразовый код первой настройки, если пароль ещё не задан.
+// Возвращает код в удобном для ввода виде (XXXX-XXXX-XXXX) или "", если пароль уже есть.
+func (a *Auth) NewSetupCode() (string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.state.Hash != "" {
+		return "", nil
+	}
+	code, err := randomCode(12)
+	if err != nil {
+		return "", err
+	}
+	a.setupCode = code
+	return code[0:4] + "-" + code[4:8] + "-" + code[8:12], nil
+}
+
+// Без похожих символов (0/O, 1/I/L): код переписывают из журнала руками.
+const codeAlphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+
+func randomCode(n int) (string, error) {
+	out := make([]byte, 0, n)
+	buf := make([]byte, 32)
+	limit := 256 / len(codeAlphabet) * len(codeAlphabet)
+	for len(out) < n {
+		if _, err := rand.Read(buf); err != nil {
+			return "", err
+		}
+		for _, b := range buf {
+			// Отбрасываем «хвост» байта, чтобы все символы были равновероятны.
+			if int(b) >= limit {
+				continue
+			}
+			out = append(out, codeAlphabet[int(b)%len(codeAlphabet)])
+			if len(out) == n {
+				break
+			}
+		}
+	}
+	return string(out), nil
+}
+
+func normalizeCode(c string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '-' || r == ' ' || r == '\t' {
+			return -1
+		}
+		return r
+	}, strings.ToUpper(strings.TrimSpace(c)))
+}
+
+// beginCheck под a.mu проверяет блокировку и занимает адрес на время bcrypt.
+// Возвращает текущий хэш пароля; после проверки вызвать endCheck.
+func (a *Auth) beginCheck(client string) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if at := a.failures[client]; at != nil && time.Now().Before(at.until) {
@@ -109,8 +215,30 @@ func (a *Auth) Login(client, password string) (string, error) {
 	if a.state.Hash == "" {
 		return "", ErrNoPassword
 	}
-	if bcrypt.CompareHashAndPassword([]byte(a.state.Hash), []byte(password)) != nil {
+	if a.checking[client] {
+		return "", ErrBusy
+	}
+	a.checking[client] = true
+	return a.state.Hash, nil
+}
+
+// Login проверяет пароль и возвращает токен новой сессии.
+// bcrypt выполняется без a.mu: иначе каждая попытка (около секунды на MIPS)
+// останавливала бы все запросы к API — Valid берёт ту же блокировку.
+func (a *Auth) Login(client, password string) (string, error) {
+	hash, err := a.beginCheck(client)
+	if err != nil {
+		return "", err
+	}
+	ok := compareHash([]byte(hash), []byte(password)) == nil
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.checking, client)
+	if !ok {
 		a.failLocked(client)
+		return "", ErrWrong
+	}
+	if a.state.Hash != hash { // пароль успели сменить, пока шла проверка
 		return "", ErrWrong
 	}
 	delete(a.failures, client)
@@ -118,36 +246,78 @@ func (a *Auth) Login(client, password string) (string, error) {
 }
 
 func (a *Auth) failLocked(client string) {
+	now := time.Now()
 	at := a.failures[client]
 	if at == nil {
+		if len(a.failures) >= maxTracked {
+			a.pruneLocked(now)
+		}
 		at = &attempts{}
 		a.failures[client] = at
 	}
 	at.count++
+	at.last = now
 	if at.count >= maxFailures {
 		d := baseLockout << at.locks
 		if d > maxLockout || d <= 0 {
 			d = maxLockout
 		}
-		at.until, at.count = time.Now().Add(d), 0
+		at.until, at.count = now.Add(d), 0
 		at.locks++
+	}
+}
+
+// pruneLocked забывает давние ошибки, а если таблица всё равно полна —
+// вытесняет самую старую запись, в первую очередь незаблокированную.
+func (a *Auth) pruneLocked(now time.Time) {
+	for k, at := range a.failures {
+		if now.After(at.until) && now.Sub(at.last) > forgetAfter {
+			delete(a.failures, k)
+		}
+	}
+	for len(a.failures) >= maxTracked {
+		var victim string
+		var vat *attempts
+		for k, at := range a.failures {
+			if vat == nil {
+				victim, vat = k, at
+				continue
+			}
+			locked, vlocked := now.Before(at.until), now.Before(vat.until)
+			if (vlocked && !locked) || (vlocked == locked && at.last.Before(vat.last)) {
+				victim, vat = k, at
+			}
+		}
+		delete(a.failures, victim)
 	}
 }
 
 // ChangePassword меняет пароль и завершает все остальные сессии.
 func (a *Auth) ChangePassword(client, current, next, keepToken string) error {
+	hash, err := a.beginCheck(client)
+	if err != nil {
+		return err
+	}
+	// Обе операции bcrypt — без блокировки.
+	ok := compareHash([]byte(hash), []byte(current)) == nil
+	var newHash string
+	if ok {
+		newHash, err = hashPassword(next)
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if at := a.failures[client]; at != nil && time.Now().Before(at.until) {
-		return LockedError{at.until}
-	}
-	if bcrypt.CompareHashAndPassword([]byte(a.state.Hash), []byte(current)) != nil {
+	delete(a.checking, client)
+	if !ok {
 		a.failLocked(client)
 		return errors.New("текущий пароль указан неверно")
 	}
-	if err := a.setHashLocked(next); err != nil {
+	if err != nil {
 		return err
 	}
+	if a.state.Hash != hash {
+		return errors.New("пароль только что сменили, обновите страницу и повторите")
+	}
+	a.state.Hash = newHash
 	keep := hashToken(keepToken)
 	for k := range a.state.Sessions {
 		if k != keep {
@@ -188,16 +358,16 @@ func (a *Auth) Logout(token string) {
 	_ = a.saveLocked()
 }
 
-func (a *Auth) setHashLocked(password string) error {
+// hashPassword проверяет длину и считает bcrypt. Вызывать без a.mu.
+func hashPassword(password string) (string, error) {
 	if len([]rune(password)) < MinPassword {
-		return ErrShort
+		return "", ErrShort
 	}
 	h, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
-		return err
+		return "", err
 	}
-	a.state.Hash = string(h)
-	return a.saveLocked()
+	return string(h), nil
 }
 
 func (a *Auth) newSessionLocked() (string, error) {

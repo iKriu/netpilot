@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 )
 
 func TestStaticServer(t *testing.T) {
@@ -56,4 +57,48 @@ func TestStaticServer(t *testing.T) {
 	if w := get("/../secret", nil); w.Code != 404 {
 		t.Fatalf("выход за пределы: %d", w.Code)
 	}
+}
+
+// blockingFS «зависает» на чтении одного файла, пока не закрыт release.
+type blockingFS struct {
+	fstest.MapFS
+	slow    string
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b blockingFS) ReadFile(name string) ([]byte, error) {
+	if name == b.slow {
+		close(b.entered)
+		<-b.release
+	}
+	return b.MapFS.ReadFile(name)
+}
+
+// Пока готовится (сжимается) большой файл, остальные отдаются без ожидания.
+func TestStaticServerPerFileLoading(t *testing.T) {
+	fsys := blockingFS{
+		MapFS:   fstest.MapFS{"big.wasm": {Data: []byte("wasm")}, "index.html": {Data: []byte("ui")}},
+		slow:    "big.wasm",
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	s := newStaticServer(fsys)
+	go s.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/big.wasm", nil))
+	<-fsys.entered
+	done := make(chan int, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/index.html", nil))
+		done <- w.Code
+	}()
+	select {
+	case code := <-done:
+		if code != 200 {
+			t.Fatalf("index.html: %d", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("загрузка одного файла блокирует остальные")
+	}
+	close(fsys.release)
 }

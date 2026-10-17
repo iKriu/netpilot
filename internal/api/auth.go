@@ -16,20 +16,45 @@ func (s *Server) registerAuth() {
 	m, au := s.mux, s.auth
 
 	m.HandleFunc("GET /api/auth/state", func(w http.ResponseWriter, r *http.Request) {
-		reply(w, map[string]bool{"setup": !au.Configured(), "authenticated": au.Valid(sessionToken(r))}, nil)
+		setup := !au.Configured()
+		reply(w, map[string]bool{
+			"setup":         setup,
+			"setupCode":     setup && !isLoopback(r), // интерфейс покажет поле для кода из журнала
+			"authenticated": au.Valid(sessionToken(r)),
+		}, nil)
 	})
 	m.HandleFunc("POST /api/auth/setup", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
 			Password string `json:"password"`
+			Code     string `json:"code"`
 		}
 		if !decode(w, r, &in) {
 			return
 		}
-		tok, err := au.Setup(in.Password)
-		if err == nil {
-			setSession(w, r, tok)
+		// С этого же компьютера код не нужен; из сети — только с кодом из журнала,
+		// иначе пароль успел бы задать любой, кто первым откроет страницу.
+		var tok string
+		var err error
+		if isLoopback(r) {
+			tok, err = au.Setup(in.Password)
+		} else {
+			tok, err = au.SetupWithCode(clientIP(r), in.Code, in.Password)
 		}
-		reply(w, nil, err)
+		if err != nil {
+			var locked auth.LockedError
+			switch {
+			case errors.As(err, &locked):
+				replyStatus(w, http.StatusTooManyRequests, err)
+			case errors.Is(err, auth.ErrSetupCode):
+				time.Sleep(400 * time.Millisecond) // замедляем перебор кода
+				replyStatus(w, http.StatusForbidden, err)
+			default:
+				reply(w, nil, err)
+			}
+			return
+		}
+		setSession(w, r, tok)
+		reply(w, nil, nil)
 	})
 	m.HandleFunc("POST /api/auth/login", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
@@ -43,7 +68,7 @@ func (s *Server) registerAuth() {
 			// Небольшая пауза делает подбор ещё медленнее.
 			time.Sleep(400 * time.Millisecond)
 			var locked auth.LockedError
-			if errors.As(err, &locked) {
+			if errors.As(err, &locked) || errors.Is(err, auth.ErrBusy) {
 				replyStatus(w, http.StatusTooManyRequests, err)
 				return
 			}
@@ -112,4 +137,11 @@ func clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// isLoopback — запрос с этого же компьютера. Смотрим только на адрес
+// соединения: X-Forwarded-For подделывается.
+func isLoopback(r *http.Request) bool {
+	ip := net.ParseIP(clientIP(r))
+	return ip != nil && ip.IsLoopback()
 }

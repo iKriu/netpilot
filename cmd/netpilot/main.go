@@ -15,6 +15,7 @@ import (
 	"netpilot/internal/api"
 	"netpilot/internal/app"
 	"netpilot/internal/auth"
+	"netpilot/internal/sysproxy"
 	"netpilot/internal/update"
 	"netpilot/web"
 )
@@ -38,6 +39,14 @@ func main() {
 	a, err := app.New(*dataDir)
 	if err != nil {
 		log.Fatalf("не удалось открыть настройки: %v", err)
+	}
+	// Прошлый запуск мог не успеть выключить системный прокси Windows —
+	// тогда он указывает на мёртвый порт и интернет пропадает везде.
+	ps := a.Store.Get().Settings
+	if cleared, err := sysproxy.ClearStale(ps.ListenAddr, ps.MixedPort); err != nil {
+		log.Printf("системный прокси: %v", err)
+	} else if cleared {
+		log.Print("выключен системный прокси, оставшийся от прошлого запуска")
 	}
 	// Сначала интернет (режим роутера), потом ядро прокси.
 	a.StartRouter()
@@ -73,7 +82,17 @@ func main() {
 		log.Print("задан начальный пароль из NETPILOT_PASSWORD")
 	}
 	if !au.Configured() {
+		// Код нужен при первой настройке не с этого компьютера: иначе пароль
+		// задал бы любой в сети, кто первым откроет страницу.
+		code, err := au.NewSetupCode()
+		if err != nil {
+			log.Fatalf("код первой настройки: %v", err)
+		}
 		log.Print("пароль не задан: откройте интерфейс и придумайте его при первом входе")
+		log.Print("==================================================")
+		log.Printf("  КОД ПЕРВОЙ НАСТРОЙКИ: %s", code)
+		log.Print("  нужен, если интерфейс открыт с другого устройства")
+		log.Print("==================================================")
 	}
 	handler := api.New(a, au, upd, static)
 	srv := &http.Server{Addr: *listen, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
@@ -95,12 +114,14 @@ func main() {
 		log.Print("перезапуск в новую версию...")
 		restart = true
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = srv.Shutdown(ctx)
-	// Важно остановить ядро: иначе на Windows останется выставленный системный прокси.
+	// Сначала ядро: оно снимает системный прокси Windows. Windows завершает
+	// консольную программу примерно через 5 с после закрытия окна — если
+	// раньше ждать веб-сервер, прокси останется указывать на мёртвый порт.
 	_ = a.Stop()
 	a.StopRouter()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(ctx)
 	if restart {
 		upd.Reexec()
 	}

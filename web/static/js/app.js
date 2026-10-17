@@ -275,13 +275,16 @@ export function waitRestart() { updateScreen(null).waitUp(); }
 
 // ---------- вход ----------
 
-function showAuth(mode) {
+// needCode — первая настройка не с этого компьютера: сервер требует код из журнала.
+function showAuth(mode, needCode) {
   if (document.querySelector('.auth')) return;
   document.getElementById('shell').hidden = true;
   document.querySelectorAll('.modal-bg').forEach(m => m.remove());
   const setup = mode === 'setup';
   const pw = h('input', { class: 'inp', type: 'password', autocomplete: setup ? 'new-password' : 'current-password', style: 'height:48px' });
   const pw2 = h('input', { class: 'inp', type: 'password', autocomplete: 'new-password', style: 'height:48px' });
+  const withCode = setup && needCode;
+  const code = h('input', { class: 'inp mono', autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false', placeholder: 'XXXX-XXXX-XXXX', style: 'height:48px' });
   const err = h('div', { class: 'err' });
   const btn = h('button', { class: 'btn p lg', type: 'submit', style: 'width:100%' }, setup ? 'Сохранить и войти' : 'Войти');
   const scr = h('div', { class: 'auth' },
@@ -293,9 +296,10 @@ function showAuth(mode) {
       e.preventDefault();
       err.textContent = '';
       if (setup && pw.value !== pw2.value) { err.textContent = 'Пароли не совпадают'; return; }
+      if (withCode && !code.value.trim()) { err.textContent = 'Введите код первой настройки'; code.focus(); return; }
       btn.disabled = true;
       try {
-        await api('POST', setup ? '/auth/setup' : '/auth/login', { password: pw.value });
+        await api('POST', setup ? '/auth/setup' : '/auth/login', withCode ? { password: pw.value, code: code.value.trim() } : { password: pw.value });
         scr.remove();
         document.getElementById('shell').hidden = false;
         startApp();
@@ -306,6 +310,8 @@ function showAuth(mode) {
         h('div', { class: 'sub' }, setup ? 'Первый запуск: придумайте пароль администратора, не короче 8 символов.' : 'Пароль администратора')),
       h('label', { class: 'fld' }, h('span', { class: 'lbl' }, 'Пароль'), pw),
       setup && h('label', { class: 'fld' }, h('span', { class: 'lbl' }, 'Ещё раз'), pw2),
+      withCode && h('label', { class: 'fld' }, h('span', { class: 'lbl' }, 'Код первой настройки'), code,
+        h('span', { class: 'hint' }, 'Код напечатан в журнале программы')),
       err, btn,
       !setup && h('div', { class: 'hint', style: 'text-align:center' }, 'Забыли пароль — задайте новый на устройстве: ', h('span', { class: 'mono', style: 'color:var(--ink)' }, 'netpilot -password')))));
   document.body.append(scr);
@@ -354,7 +360,7 @@ function startApp() {
 }
 
 get('/auth/state').then(s => {
-  if (s.setup) showAuth('setup');
+  if (s.setup) showAuth('setup', s.setupCode);
   else if (!s.authenticated) showAuth('login');
   else startApp();
 }).catch(() => showAuth('login'));

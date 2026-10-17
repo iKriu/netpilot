@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,10 +27,11 @@ type Server struct {
 	auth *auth.Auth
 	upd  *update.Updater
 	mux  *http.ServeMux
+	host hostPolicy
 }
 
 func New(a *app.App, au *auth.Auth, upd *update.Updater, static fs.FS) http.Handler {
-	s := &Server{app: a, auth: au, upd: upd, mux: http.NewServeMux()}
+	s := &Server{app: a, auth: au, upd: upd, mux: http.NewServeMux(), host: newHostPolicy()}
 	m := s.mux
 	s.registerAuth()
 	s.registerUpdate()
@@ -102,7 +104,10 @@ func New(a *app.App, au *auth.Auth, upd *update.Updater, static fs.FS) http.Hand
 	})
 
 	m.HandleFunc("POST /api/cores/{name}/install", func(w http.ResponseWriter, r *http.Request) {
-		v, err := a.InstallCore(r.Context(), r.PathValue("name"))
+		// Закрытая вкладка не должна обрывать скачивание ядра на середине.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Minute)
+		defer cancel()
+		v, err := a.InstallCore(ctx, r.PathValue("name"))
 		reply(w, map[string]string{"version": v}, err)
 	})
 	m.HandleFunc("DELETE /api/cores/{name}", func(w http.ResponseWriter, r *http.Request) {
@@ -298,6 +303,11 @@ func New(a *app.App, au *auth.Auth, upd *update.Updater, static fs.FS) http.Hand
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Защита от DNS rebinding — для всех адресов, включая страницы интерфейса.
+	if !s.host.allowed(r.Host) {
+		http.Error(w, "недопустимое имя хоста; откройте интерфейс по IP-адресу или добавьте имя в NETPILOT_ALLOWED_HOSTS", http.StatusMisdirectedRequest)
+		return
+	}
 	// Защита от CSRF: интерфейс доступен в локальной сети, поэтому изменяющие
 	// запросы принимаем только со своей страницы.
 	if r.Method != http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/") {
