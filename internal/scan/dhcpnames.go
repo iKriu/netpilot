@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -31,8 +32,38 @@ func ListenDHCP(ctx context.Context, allowed func() bool) {
 	runDHCPListener(ctx, allowed, openDHCP, dhcpCheckEvery)
 }
 
+// Порт открывается без SO_REUSEADDR: если на машине уже работает свой
+// DHCP-сервер (Pi-hole, dnsmasq), занять порт рядом с ним нельзя — и не нужно.
+// С SO_REUSEADDR ядро Linux отдавало бы адресные запросы (продление аренды)
+// только одному из сокетов, и часть их доставалась бы нам, а не серверу.
+func openDHCP() (net.PacketConn, error) { return net.ListenPacket("udp4", "0.0.0.0:67") }
+
+var (
+	dhcpRunning   atomic.Bool              // цикл слушателя запущен
+	dhcpHoldUntil atomic.Int64             // до какого момента (unix ns) порт не открывать
+	dhcpRelease   = make(chan chan struct{}) // просьба закрыть сокет сейчас
+)
+
+// ReleaseDHCPPort закрывает сокет слушателя и не открывает его hold: так
+// dnsmasq режима роутера гарантированно получит порт 67, даже если режим
+// включают на ходу, а проверка allowed() ещё не успела сработать.
+func ReleaseDHCPPort(hold time.Duration) {
+	dhcpHoldUntil.Store(time.Now().Add(hold).UnixNano())
+	if !dhcpRunning.Load() {
+		return
+	}
+	ack := make(chan struct{})
+	select {
+	case dhcpRelease <- ack:
+		<-ack
+	case <-time.After(2 * time.Second): // цикл занят открытием — откроет уже с учётом hold
+	}
+}
+
 // runDHCPListener — цикл управления сокетом; open подменяется в тестах.
 func runDHCPListener(ctx context.Context, allowed func() bool, open func() (net.PacketConn, error), every time.Duration) {
+	dhcpRunning.Store(true)
+	defer dhcpRunning.Store(false)
 	var (
 		pc   net.PacketConn
 		done chan struct{}
@@ -48,7 +79,8 @@ func runDHCPListener(ctx context.Context, allowed func() bool, open func() (net.
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
-		if allowed == nil || allowed() {
+		held := time.Now().UnixNano() < dhcpHoldUntil.Load()
+		if !held && (allowed == nil || allowed()) {
 			if pc == nil {
 				if c, err := open(); err == nil {
 					pc, done = c, make(chan struct{})
@@ -61,6 +93,9 @@ func runDHCPListener(ctx context.Context, allowed func() bool, open func() (net.
 		select {
 		case <-ctx.Done():
 			return
+		case ack := <-dhcpRelease:
+			closeConn()
+			close(ack)
 		case <-t.C:
 		}
 	}

@@ -82,7 +82,8 @@ func TestHostCheck(t *testing.T) {
 		}
 	}
 	allowed := []string{"192.168.1.1", "192.168.1.1:2017", "[::1]:2017", "[fe80::1]", "localhost:2017", "LOCALHOST",
-		"ui.localhost", "router.home:2017", "proxy.example.org", "Router.Home.", "", short + ":2017", short + ".local", short + ".lan"}
+		"ui.localhost", "router.home:2017", "proxy.example.org", "Router.Home.", "", short + ":2017", short + ".local", short + ".lan",
+		"zimaos", "zimaos.local", "nas.home.arpa", "gw.internal", "router.localdomain"}
 	for _, host := range allowed {
 		r := httptest.NewRequest("GET", "/", nil)
 		r.Host = host

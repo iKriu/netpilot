@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -70,7 +72,7 @@ func New(a *app.App, au *auth.Auth, upd *update.Updater, static fs.FS) http.Hand
 		if !decode(w, r, &in) {
 			return
 		}
-		if err := model.ValidateSettings(&in); err != nil {
+		if err := validateSettingsChange(in, a.Store.Get().Settings); err != nil {
 			reply(w, nil, err)
 			return
 		}
@@ -440,6 +442,27 @@ func collection[T any](s *Server, name string, list func(*model.Config) *[]T, id
 
 var errNotFound = errors.New("не найдено")
 
+// validateSettingsChange проверяет только то, что человек изменил. Поля, равные
+// сохранённым, перед проверкой заменяются значениями по умолчанию: настройки,
+// записанные прежней версией без этой проверки, иначе не дали бы сохранить
+// вообще ничего — даже включить автозапуск, — пока не найдёшь старое поле.
+func validateSettingsChange(in, cur model.Settings) error {
+	probe, def := in, model.Defaults().Settings
+	pv, iv, cv, dv := reflect.ValueOf(&probe).Elem(), reflect.ValueOf(in), reflect.ValueOf(cur), reflect.ValueOf(def)
+	for i := range pv.NumField() {
+		if reflect.DeepEqual(iv.Field(i).Interface(), cv.Field(i).Interface()) {
+			pv.Field(i).Set(dv.Field(i))
+		}
+	}
+	if err := model.ValidateSettings(&probe); err != nil {
+		return err
+	}
+	if err := model.ValidateSettings(&in); err != nil {
+		log.Printf("настройки сохранены с ошибкой, оставшейся от прежней версии: %v", err)
+	}
+	return nil
+}
+
 // inUseError — удаляемый объект где-то используется. Отвечаем 409 со списком
 // мест: интерфейс показывает его и повторяет запрос с ?force=1.
 type inUseError struct {
@@ -487,6 +510,13 @@ func detach(c *model.Config, ids []string, what string, force bool) error {
 		return nil
 	}
 	gone := func(id string) bool { return slices.Contains(ids, id) }
+	// Группа с пустым списком и без фильтра означает «все серверы»: молча
+	// расширять «Европу» до всех стран нельзя — пусть человек решит сам.
+	for _, g := range c.Groups {
+		if len(g.NodeIDs) > 0 && g.Filter == "" && !slices.ContainsFunc(g.NodeIDs, func(id string) bool { return !gone(id) }) {
+			return fmt.Errorf("в группе «%s» не останется серверов, и она стала бы группой из всех серверов — удалите группу или добавьте в неё другие серверы", g.Name)
+		}
+	}
 	if gone(c.Settings.DefaultTarget) {
 		c.Settings.DefaultTarget = ""
 	}

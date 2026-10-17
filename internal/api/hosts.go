@@ -50,7 +50,28 @@ func (p hostPolicy) allowed(hostport string) bool {
 	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
 		return true
 	}
+	// Имена, которые нельзя получить в публичном DNS, для DNS rebinding не
+	// годятся: атакующему нужно своё имя, разрешаемое из интернета. Поэтому
+	// пропускаем однословные имена (zimaos) и локальные зоны (zimaos.local,
+	// router.lan). Без этого в Docker панель не открывалась бы по имени
+	// машины: os.Hostname() там — идентификатор контейнера.
+	if !strings.Contains(h, ".") || localZone(h) {
+		return true
+	}
 	return p.names[h]
+}
+
+// localZones — зоны только для локальной сети (RFC 6762, RFC 8375 и
+// распространённые нестандартные, которые не делегированы в публичном DNS).
+var localZones = []string{".local", ".lan", ".home", ".home.arpa", ".internal", ".localdomain"}
+
+func localZone(h string) bool {
+	for _, z := range localZones {
+		if strings.HasSuffix(h, z) {
+			return true
+		}
+	}
+	return false
 }
 
 // normHost: нижний регистр, без порта, скобок IPv6 и точки в конце.

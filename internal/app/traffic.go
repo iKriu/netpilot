@@ -286,7 +286,9 @@ func (a *App) applyConnections(now time.Time, body clashConnections) {
 				targets = closedConns(meta, nil)
 			}
 			if len(targets) == 0 {
-				targets = []connMeta{{proxied: true}} // чьё — неизвестно
+				// Чьё — неизвестно; относим туда, куда идёт трафик без правил:
+				// при «по умолчанию напрямую» это прямой трафик, а не прокси.
+				targets = []connMeta{{proxied: a.Store.Get().Settings.DefaultAction != "direct"}}
 			}
 			ups := split(resUp, targets, func(m connMeta) int64 { return m.up })
 			downs := split(resDown, targets, func(m connMeta) int64 { return m.down })

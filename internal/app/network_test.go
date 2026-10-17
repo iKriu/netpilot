@@ -54,6 +54,14 @@ func TestMergeStaleIPs(t *testing.T) {
 			updated: true,
 		},
 		{
+			name:    "владелец закрепления виден на другом адресе: адрес получает тот, кто на нём",
+			devices: []model.Device{dev("tablet", macTablet, ipX, "direct", true)},
+			hosts:   []scan.Host{{IP: ipY, MAC: macTablet}, {IP: ipX, MAC: macGuest}},
+			wantIP:  map[string]string{"tablet": ipX, "new": ipX},
+			warn:    true,
+			updated: true,
+		},
+		{
 			name:    "закреплённый адрес занят известным устройством: его старый адрес снимается",
 			devices: []model.Device{dev("tablet", macTablet, ipX, "block", true), dev("phone", macPhone, ipY, "proxy", false)},
 			hosts:   []scan.Host{{IP: ipX, MAC: macPhone}},

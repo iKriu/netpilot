@@ -12,6 +12,7 @@ import (
 
 	"netpilot/internal/model"
 	"netpilot/internal/router"
+	"netpilot/internal/scan"
 )
 
 // Настройки сети применяются «на пробу»: если за это время их не подтвердить
@@ -87,6 +88,9 @@ func (a *App) RouterApply(next model.Router) (time.Time, error) {
 		a.router.pending.timer.Stop()
 		prev = a.router.pending.prev // откатываться — к последнему подтверждённому
 	}
+	if next.Enabled {
+		releaseDHCP()
+	}
 	if err := a.Router.Apply(next, a.leases()); err != nil {
 		if rerr := a.Router.Apply(prev, a.leases()); rerr != nil {
 			log.Printf("возврат прежних настроек сети: %v", rerr)
@@ -127,12 +131,20 @@ func (a *App) routerRollback(p *routerPending) {
 		return // уже подтверждено или заменено
 	}
 	log.Print("настройки сети не подтверждены — возвращаю прежние")
+	if p.prev.Enabled {
+		releaseDHCP()
+	}
 	if err := a.Router.Apply(p.prev, a.leases()); err != nil {
 		log.Printf("возврат прежних настроек сети: %v", err)
 	}
 	a.router.active, a.router.pending = p.prev, nil
 	a.routerChanged()
 }
+
+// releaseDHCP освобождает порт 67 от слушателя имён DHCP перед запуском
+// нашего dnsmasq: проверка «режим роутера включён» в слушателе срабатывает
+// раз в несколько секунд, а dnsmasq стартует сразу.
+func releaseDHCP() { scan.ReleaseDHCPPort(15 * time.Second) }
 
 func (a *App) RouterReconnect() error { return a.Router.Reconnect() }
 
@@ -148,6 +160,7 @@ func (a *App) StartRouter() {
 	}
 	a.router.mu.Lock()
 	defer a.router.mu.Unlock()
+	releaseDHCP()
 	if err := a.Router.Apply(cfg, a.leases()); err != nil {
 		log.Printf("режим роутера: %v", err)
 		return

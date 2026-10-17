@@ -191,3 +191,51 @@ func checkDetached(t *testing.T, c *model.Config) {
 		t.Errorf("References после удаления: %v", refs)
 	}
 }
+
+// Последний сервер группы без фильтра не удаляется даже с force: пустой
+// список означал бы «все серверы», и правила на группу ушли бы куда угодно.
+func TestDeleteLastGroupMember(t *testing.T) {
+	h, a, ck := newAppServer(t, func(c *model.Config) {
+		referenced(c)
+		c.Groups[0].NodeIDs = []string{"n1"}
+	})
+	w := do(h, req{method: "DELETE", path: "/api/nodes/n1?force=1", hdr: ck})
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "не останется серверов") {
+		t.Fatalf("удаление последнего сервера группы: %d %s", w.Code, w.Body)
+	}
+	if len(a.Store.Get().Nodes) != 2 || len(a.Store.Get().Groups[0].NodeIDs) != 1 {
+		t.Fatal("конфигурация изменилась, хотя удаление отклонено")
+	}
+}
+
+// Ошибка, оставшаяся от прежней версии, не мешает сохранить другие настройки,
+// а новая ошибка по-прежнему отклоняется.
+func TestSettingsKeepLegacyError(t *testing.T) {
+	h, a, ck := newAppServer(t, func(c *model.Config) { c.Settings.ListenAddr = "localhost" })
+	s := a.Store.Get().Settings
+	s.AutoStart = true
+	body, _ := json.Marshal(s)
+	if w := do(h, req{method: "PUT", path: "/api/settings", body: string(body), hdr: ck}); w.Code != http.StatusOK {
+		t.Fatalf("сохранение с прежней ошибкой: %d %s", w.Code, w.Body)
+	}
+	if !a.Store.Get().Settings.AutoStart {
+		t.Fatal("автозапуск не сохранён")
+	}
+	s.MixedPort = 0
+	body, _ = json.Marshal(s)
+	if w := do(h, req{method: "PUT", path: "/api/settings", body: string(body), hdr: ck}); w.Code != http.StatusBadRequest {
+		t.Fatalf("новая ошибка должна отклоняться: %d %s", w.Code, w.Body)
+	}
+}
+
+// Новая ошибка в изменённом поле не прячется за старой, стоящей раньше по
+// порядку проверок.
+func TestSettingsNewErrorBehindLegacy(t *testing.T) {
+	h, a, ck := newAppServer(t, func(c *model.Config) { c.Settings.ListenAddr = "localhost" })
+	s := a.Store.Get().Settings
+	s.Mode = "nonsense"
+	body, _ := json.Marshal(s)
+	if w := do(h, req{method: "PUT", path: "/api/settings", body: string(body), hdr: ck}); w.Code != http.StatusBadRequest {
+		t.Fatalf("неверный режим должен отклоняться: %d %s", w.Code, w.Body)
+	}
+}

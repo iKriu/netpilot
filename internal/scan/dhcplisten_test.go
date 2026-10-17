@@ -121,3 +121,21 @@ func TestDHCPListenerRetriesOpen(t *testing.T) {
 	go runDHCPListener(ctx, nil, open, 10*time.Millisecond)
 	waitFor(t, "сокет открыт после неудач", func() bool { return len(f.snapshot()) == 1 })
 }
+
+// ReleaseDHCPPort закрывает сокет сразу (не ждёт следующей проверки allowed)
+// и не даёт открыть его заново, пока длится удержание.
+func TestReleaseDHCPPort(t *testing.T) {
+	f := &fakeOpener{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go runDHCPListener(ctx, nil, f.open, time.Hour) // allowed() сам ничего не закроет
+	waitFor(t, "сокет открыт", func() bool { return len(f.snapshot()) == 1 })
+
+	ReleaseDHCPPort(200 * time.Millisecond)
+	if !f.snapshot()[0].closed.Load() {
+		t.Fatal("после ReleaseDHCPPort сокет должен быть уже закрыт")
+	}
+	dhcpHoldUntil.Store(0) // удержание вышло
+	ReleaseDHCPPort(0)     // будим цикл, чтобы он открыл порт заново
+	waitFor(t, "сокет открыт после удержания", func() bool { return len(f.snapshot()) == 2 })
+}

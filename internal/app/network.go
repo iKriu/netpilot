@@ -31,6 +31,7 @@ type network struct {
 	networks []string
 	warnings []string
 	scanning bool
+	applying bool // идёт автоприменение после смены адресов (routingIPsChanged)
 }
 
 const onlineWindow = 3 * time.Minute
@@ -156,6 +157,13 @@ func (a *App) merge(hosts []scan.Host) (ScanReport, error) {
 	var ipChanged bool
 	var warnings []string
 
+	// Где каждый MAC виден в этом сканировании: закрепление, владелец которого
+	// сейчас на другом адресе, на деле не действует (адрес не зарезервирован
+	// на роутере), и его адрес честно принадлежит тому, кто на нём сейчас.
+	seenAt := make(map[string]string, len(hosts))
+	for _, h := range hosts {
+		seenAt[h.MAC] = h.IP
+	}
 	err := a.Store.Update(func(c *model.Config) error {
 		rep.Added, rep.Updated, rep.Removed, ipChanged, warnings = 0, 0, 0, false, nil
 		clear(seen)
@@ -219,7 +227,11 @@ func (a *App) merge(hosts []scan.Host) (ScanReport, error) {
 					continue
 				}
 				if o.Pinned {
-					pinnedBy = j
+					if at, ok := seenAt[scan.NormalizeMAC(o.MAC)]; !ok || at == h.IP {
+						pinnedBy = j // владелец не виден в другом месте — адрес за ним
+					} else {
+						warnings = append(warnings, fmt.Sprintf("Адрес %s закреплён за «%s», но оно сейчас на %s, а этот адрес занял %s: закрепление не действует — зарезервируйте адрес на роутере.", h.IP, o.Name, at, h.MAC))
+					}
 					continue
 				}
 				o.IP = ""
@@ -339,11 +351,36 @@ func (a *App) routingIPsChanged() {
 	}
 	running, onlyAuto := a.active != nil, a.dirty && a.dirtyBySubs
 	a.mu.Unlock()
-	if running && onlyAuto && runtime.GOOS == "linux" {
-		if err := a.Apply(); err != nil {
-			log.Printf("применение новых адресов устройств: %v", err)
-		}
+	if !running || !onlyAuto || runtime.GOOS != "linux" {
+		return
 	}
+	// В фоне: Apply может докачивать списки (до минуты на каждый), а сюда
+	// приходим из сканирования, которое держит scanMu. Одновременно — одно
+	// применение: следующее всё равно увидит самую свежую конфигурацию.
+	n := &a.net
+	n.mu.Lock()
+	if n.applying {
+		n.mu.Unlock()
+		return
+	}
+	n.applying = true
+	n.mu.Unlock()
+	go func() {
+		defer func() { n.mu.Lock(); n.applying = false; n.mu.Unlock() }()
+		for {
+			if err := a.Apply(); err != nil {
+				log.Printf("применение новых адресов устройств: %v", err)
+				return
+			}
+			// Пока шло применение, адреса могли смениться ещё раз.
+			a.mu.Lock()
+			again := a.active != nil && a.dirty && a.dirtyBySubs
+			a.mu.Unlock()
+			if !again {
+				return
+			}
+		}
+	}()
 }
 
 var errNoChanges = errors.New("без изменений")
