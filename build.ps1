@@ -70,7 +70,11 @@ if ($Docker) {
 }
 
 $Go = Get-Go
-$env:GOTOOLCHAIN = "local"
+# Ровно та версия Go, что указана в go.mod: портативный Go в .tools может быть
+# старше, а "local" тогда отказывался собирать. Нужную версию go скачает сам
+# (с проверкой контрольной суммы), сборка остаётся воспроизводимой.
+$goVer = (Select-String -Path (Join-Path $Root "go.mod") -Pattern '^go (\S+)').Matches[0].Groups[1].Value
+$env:GOTOOLCHAIN = "go$goVer"
 $env:CGO_ENABLED = "0"
 $Version = (Get-Content (Join-Path $Root "VERSION") -Raw).Trim()
 $LdFlags = "-s -w -X netpilot/internal/app.Version=$Version"
