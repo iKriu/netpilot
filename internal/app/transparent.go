@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/netip"
 	"runtime"
+	"time"
 
 	"netpilot/internal/firewall"
 	"netpilot/internal/model"
@@ -88,13 +89,53 @@ func (a *App) applyFirewallLocked() error {
 }
 
 func (a *App) removeFirewallLocked() {
-	if !a.fwOn {
+	if a.fwOn {
+		if err := firewall.Remove(); err != nil {
+			log.Printf("снятие перехвата: %v", err)
+		}
+		a.fwOn = false
+	}
+	a.ensureFallbackLocked()
+}
+
+// tpState — служебное состояние прозрачного режима и проверки живучести.
+type tpState struct {
+	// hold — не включать запасной DNS: ядро сейчас же запустится снова
+	// (применение настроек ядру без перезагрузки на лету — остановка и запуск)
+	// или программа завершается. Иначе правило мигнуло бы на долю секунды.
+	hold bool
+	// fbSkip — последняя причина, по которой запасной DNS не включён (в журнал один раз).
+	fbSkip string
+	// healthRestarts — перезапуски ядра проверкой живучести (см. health.go).
+	healthRestarts []time.Time
+}
+
+// Точки подмены для тестов: на Windows нет nftables, а в тестах — настоящей сети.
+var (
+	fallbackOS     = runtime.GOOS == "linux"
+	setDNSFallback = firewall.DNSFallback
+	localResolver  = firewall.LocalResolver
+	systemDNS      = firewall.SystemDNS
+	defaultGateway = func() string {
+		if routes, ok := firewall.DefaultRoutes(); ok && len(routes) > 0 && routes[0].Gateway.IsValid() {
+			return routes[0].Gateway.String()
+		}
+		return ""
+	}
+)
+
+// ensureFallbackLocked включает запасной DNS, если ядро не работает — по любой
+// причине: остановлено, упало, не запустилось при старте программы. Перехват
+// при этом мог и не включаться ни разу (fwOn=false), а DNS устройств всё равно
+// указан на шлюз — поэтому решение не зависит от fwOn.
+func (a *App) ensureFallbackLocked() {
+	if a.active != nil || a.tp.hold {
 		return
 	}
-	if err := firewall.Remove(); err != nil {
-		log.Printf("снятие перехвата: %v", err)
+	// «Блокировать интернет при сбое»: перехват оставлен намеренно, DNS тоже не подменяем.
+	if a.fwOn {
+		return
 	}
-	a.fwOn = false
 	a.dnsFallbackLocked(true)
 }
 
@@ -104,36 +145,75 @@ func (a *App) removeFirewallLocked() {
 // никто не отвечает: у всей сети перестают открываться сайты. Запасной DNS
 // пересылает такие запросы туда, куда ходит сама система (роутер, провайдер).
 // В режиме роутера DNS отвечает наш dnsmasq — запасной там не нужен и мешал бы.
+//
+// Только IPv4: устройства получают DNS шлюза по DHCP (IPv4), а IPv6-адрес
+// шлюза как DNS раздаётся редко; для ip6 понадобилась бы своя таблица с
+// IPv6-upstream, которого у системы может и не быть.
 func (a *App) dnsFallbackLocked(on bool) {
-	if runtime.GOOS != "linux" {
+	if !fallbackOS {
 		return
 	}
 	if !on {
-		if !a.dnsFB {
-			return
-		}
-		if err := firewall.DNSFallback(""); err != nil {
+		// Не полагаемся только на флаг: если прошлое удаление не удалось или
+		// правило осталось от другого пути, DNSFallback("") проверит таблицу
+		// сам и удалит её, если она есть.
+		if err := setDNSFallback(""); err != nil {
 			log.Printf("запасной DNS: %v", err)
 			return
 		}
+		if a.dnsFB {
+			log.Print("запасной DNS выключен: DNS устройств снова обслуживает ядро")
+		}
 		a.dnsFB = false
-		log.Print("запасной DNS выключен: DNS устройств снова обслуживает ядро")
 		return
 	}
 	if !transparent(a.Store.Get().Settings) || a.routerEnabled() {
 		return
 	}
-	up := firewall.SystemDNS()
-	if up == "" {
-		log.Print("запасной DNS не включён: не найден DNS-сервер системы")
+	if a.dnsFB {
 		return
 	}
-	if err := firewall.DNSFallback(up); err != nil {
+	skip := func(why string) {
+		if why != a.tp.fbSkip {
+			log.Printf("запасной DNS не включён: %s", why)
+			a.tp.fbSkip = why
+		}
+	}
+	if why := localResolver(); why != "" {
+		skip(why)
+		return
+	}
+	up := fallbackUpstream(systemDNS(), defaultGateway(), firewall.IsLocalAddr)
+	if up == "" {
+		skip("не найден DNS-сервер")
+		return
+	}
+	if err := setDNSFallback(up); err != nil {
 		log.Printf("запасной DNS: %v", err)
 		return
 	}
-	a.dnsFB = true
+	a.dnsFB, a.tp.fbSkip = true, ""
 	log.Printf("запасной DNS включён: запросы устройств к шлюзу идут на %s", up)
+}
+
+// fallbackUpstream выбирает, куда пересылать DNS устройств, пока ядро не
+// работает. Адреса самого сервера не годятся никогда: DNAT на себя — петля.
+//  1. DNS системы — туда ходит сам сервер, это проверенный путь;
+//  2. шлюз по умолчанию — почти всегда это роутер, а домашние роутеры
+//     отвечают на DNS (пересылают провайдеру). Он ближе и знает локальные
+//     имена, поэтому лучше публичного;
+//  3. 1.1.1.1 — обычный DNS без шифрования: правило nftables умеет только
+//     пересылать пакеты, DoT/DoH тут невозможны. Если и он недоступен, хуже
+//     не станет: без запасного DNS у устройств имена не разрешаются вовсе.
+func fallbackUpstream(system, gateway string, isLocal func(netip.Addr) bool) string {
+	for _, c := range []string{system, gateway, "1.1.1.1"} {
+		ip, err := netip.ParseAddr(c)
+		if err != nil || !ip.Is4() || ip.IsLoopback() || ip.IsUnspecified() || (isLocal != nil && isLocal(ip)) {
+			continue
+		}
+		return ip.String()
+	}
+	return ""
 }
 
 // Shutdown — завершение программы: ядро останавливается, перехват и запасной
@@ -142,6 +222,7 @@ func (a *App) dnsFallbackLocked(on bool) {
 func (a *App) Shutdown() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.tp.hold = true // программа завершается — запасной DNS не включаем
 	err := a.stopLocked()
 	a.dnsFallbackLocked(false)
 	return err

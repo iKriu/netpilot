@@ -1,6 +1,7 @@
 package firewall
 
 import (
+	"net/netip"
 	"strings"
 	"testing"
 )
@@ -103,9 +104,14 @@ func TestFirstNameserver(t *testing.T) {
 		"# от systemd\nnameserver 192.168.0.1\nnameserver 8.8.8.8": "192.168.0.1",
 		"nameserver fe80::1\nnameserver 77.88.8.8\n":               "77.88.8.8",
 		"search lan\n": "",
+		// Свой адрес (роутер раздал NetPilot как DNS и самому серверу) — пропускаем.
+		"nameserver 192.168.0.73\nnameserver 192.168.0.1\n": "192.168.0.1",
+		"nameserver 192.168.0.73\n":                         "",
 	}
+	self := netip.MustParseAddr("192.168.0.73")
+	isLocal := func(ip netip.Addr) bool { return ip == self }
 	for in, want := range cases {
-		if got := firstNameserver(in); got != want {
+		if got := firstNameserver(in, isLocal); got != want {
 			t.Errorf("%q: %q, ожидался %q", in, got, want)
 		}
 	}

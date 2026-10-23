@@ -267,20 +267,40 @@ func DNSFallbackRuleset(upstream string) (string, error) {
 	return b.String(), nil
 }
 
-// firstNameserver — первый IPv4-сервер из resolv.conf, кроме локальных
-// заглушек (127.0.0.53 у systemd-resolved): пересылать DNS устройств нужно
-// туда, куда ходит сама система, а не на loopback.
-func firstNameserver(resolv string) string {
+// nameservers — IPv4-серверы из resolv.conf по порядку, кроме локальных
+// заглушек (127.0.0.53 у systemd-resolved).
+func nameservers(resolv string) []netip.Addr {
+	var out []netip.Addr
 	for _, line := range strings.Split(resolv, "\n") {
 		f := strings.Fields(line)
 		if len(f) < 2 || f[0] != "nameserver" {
 			continue
 		}
 		if ip, err := netip.ParseAddr(f[1]); err == nil && ip.Is4() && !ip.IsLoopback() && !ip.IsUnspecified() {
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
+// firstNameserver — первый IPv4-сервер из resolv.conf, который не является
+// этим компьютером: пересылать DNS устройств нужно туда, куда ходит сама
+// система, а не на loopback. Свои адреса пропускаем: если роутер раздал
+// NetPilot как DNS всем, включая сам сервер, запасной DNS переслал бы запросы
+// самому себе — петля, и у сети нет DNS как раз тогда, когда он нужнее всего.
+func firstNameserver(resolv string, isLocal func(netip.Addr) bool) string {
+	for _, ip := range nameservers(resolv) {
+		if isLocal == nil || !isLocal(ip) {
 			return ip.String()
 		}
 	}
 	return ""
+}
+
+// IsLocalAddr — адрес принадлежит этому компьютеру (loopback или адрес интерфейса).
+func IsLocalAddr(ip netip.Addr) bool {
+	ip = ip.Unmap()
+	return ip.IsLoopback() || slices.Contains(LocalAddrs(), ip)
 }
 
 // Status — применимость прозрачного режима на этой системе.
@@ -288,4 +308,7 @@ type Status struct {
 	Supported bool     `json:"supported"`
 	Active    bool     `json:"active"`
 	Problems  []string `json:"problems,omitempty"`
+	// Critical — проблемы, при которых у сервера (и у всей сети через него)
+	// нет интернета вовсе; они же есть в Problems. Показываются на обзоре.
+	Critical []string `json:"critical,omitempty"`
 }
