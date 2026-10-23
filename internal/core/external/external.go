@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"netpilot/internal/atomicfile"
 	"netpilot/internal/core/logfile"
 )
 
@@ -332,17 +333,15 @@ func Install(ctx context.Context, dl Downloader, rel Release, dir string) (strin
 		return "", fmt.Errorf("в архиве нет %s", rel.Binary)
 	}
 	// Пишем во временные файлы и переименовываем: работающее ядро не повредится.
+	// Со сбросом на диск: пустой бинарник после сбоя питания — ядро не
+	// запустится после перезагрузки.
 	for fname, b := range files {
-		tmp := filepath.Join(dir, fname+".new")
-		if err := os.WriteFile(tmp, b, 0o755); err != nil {
-			return "", err
-		}
-		if err := os.Rename(tmp, filepath.Join(dir, fname)); err != nil {
+		if err := atomicfile.Write(filepath.Join(dir, fname), b, 0o755); err != nil {
 			return "", err
 		}
 	}
 	version := strings.TrimPrefix(gh.Tag, "v")
-	_ = os.WriteFile(filepath.Join(dir, "VERSION"), []byte(version), 0o644)
+	_ = atomicfile.Write(filepath.Join(dir, "VERSION"), []byte(version), 0o644)
 	return version, nil
 }
 

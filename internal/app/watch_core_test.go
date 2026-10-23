@@ -2,6 +2,8 @@ package app
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -181,5 +183,19 @@ func TestStopCancelsPendingRestart(t *testing.T) {
 	time.Sleep(400 * time.Millisecond)
 	if s := a.Status(); s.Running || s.Restarting || fp.startCount() != 1 {
 		t.Fatalf("перезапуск после остановки: %+v, запусков %d", s, fp.startCount())
+	}
+}
+
+// Журнал на момент сбоя остаётся в core.crash.log: перезапуски его не затрут.
+func TestKeepCrashLog(t *testing.T) {
+	dir := t.TempDir()
+	a := &App{DataDir: dir}
+	if err := os.WriteFile(filepath.Join(dir, "core.log"), []byte("FATAL: причина сбоя\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a.keepCrashLog()
+	got, err := os.ReadFile(filepath.Join(dir, "core.crash.log"))
+	if err != nil || string(got) != "FATAL: причина сбоя\n" {
+		t.Fatalf("core.crash.log: %q %v", got, err)
 	}
 }

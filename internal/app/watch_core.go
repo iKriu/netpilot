@@ -2,9 +2,13 @@ package app
 
 import (
 	"fmt"
+	"io"
 	"log"
+	"os"
+	"path/filepath"
 	"time"
 
+	"netpilot/internal/atomicfile"
 	"netpilot/internal/core"
 )
 
@@ -59,6 +63,7 @@ func (a *App) coreExited(ex core.Exiter, gen uint64) {
 // coreFailedLocked — ядро упало или перестало пропускать трафик: остановить
 // его, применить политику при сбое и назначить перезапуск.
 func (a *App) coreFailedLocked(name, what string) {
+	a.keepCrashLog()
 	_ = a.active.Stop() // освобождаем состояние процесса и адрес API
 	// Статус больше не «работает», пока ядро не запустится снова.
 	a.active, a.dirty, a.dirtyBySubs = nil, false, false
@@ -131,4 +136,32 @@ func (a *App) tryRestart(gen uint64) {
 		return
 	}
 	log.Printf("ядро %s перезапущено после сбоя", a.active.Name())
+}
+
+// crashLogMax — сколько последних байт журнала хранить в core.crash.log.
+const crashLogMax = 1 << 20
+
+// keepCrashLog сохраняет хвост журнала ядра в момент сбоя в core.crash.log.
+// Обычная ротация (core.log → core.log.1) при каждом запуске не спасает:
+// после сбоя ядро перезапускается по нескольку раз, и журнал с причиной
+// уходит за пределы одной сохранённой копии.
+func (a *App) keepCrashLog() {
+	path := filepath.Join(a.DataDir, "core.log")
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || st.Size() == 0 {
+		return
+	}
+	if st.Size() > crashLogMax {
+		_, _ = f.Seek(st.Size()-crashLogMax, 0)
+	}
+	data := make([]byte, min(st.Size(), crashLogMax))
+	n, _ := io.ReadFull(f, data)
+	if err := atomicfile.Write(filepath.Join(a.DataDir, "core.crash.log"), data[:n], 0o644); err != nil {
+		log.Printf("журнал сбоя ядра: %v", err)
+	}
 }

@@ -2,16 +2,20 @@
 package store
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
+	"netpilot/internal/atomicfile"
 	"netpilot/internal/model"
 )
 
@@ -23,6 +27,9 @@ type Store struct {
 	mu   sync.Mutex // упорядочивает записи; чтение блокировок не берёт
 	path string
 	cur  atomic.Pointer[model.Config]
+	// recovered — сообщение о восстановлении из резервной копии при запуске
+	// (задаётся в Open и дальше не меняется, поэтому без блокировки).
+	recovered string
 }
 
 // onDisk — формат файла: поля конфигурации плюс версия формата рядом с ними.
@@ -56,18 +63,102 @@ func Open(dataDir string, firstRun func(*model.Config)) (*Store, error) {
 		return nil, err
 	}
 	migrated, err := load(data, cfg)
-	if err != nil {
+	switch {
+	case err != nil && corrupt(data):
+		if cfg, err = s.restoreBackup(data, err); err != nil {
+			return nil, err
+		}
+	case err != nil:
+		// Файл цел, но не читается (например, формат новее программы) —
+		// это не сбой диска, восстанавливать из копий нельзя: потеряли бы
+		// настройки новой версии.
 		return nil, err
-	}
-	if migrated {
+	case migrated:
 		// Прежний файл оставляем рядом: если миграция ошиблась, его можно вернуть.
-		_ = os.WriteFile(s.path+".bak", data, 0o600)
+		_ = atomicfile.Write(s.path+".bak", data, 0o600)
 		if err := s.save(cfg); err != nil {
 			return nil, err
 		}
 	}
 	s.cur.Store(cfg)
+	// Свежая точка восстановления — раз за запуск, а не при каждом сохранении:
+	// на роутерах с флеш-памятью лишние записи изнашивают её. Копия новее
+	// .bak (тот пишется только при миграции) и пригодится, если config.json
+	// испортится при следующем отключении питания.
+	if b, err := encode(cfg); err == nil {
+		if err := atomicfile.Write(s.path+".prev", b, 0o600); err != nil {
+			log.Printf("не удалось сохранить резервную копию настроек: %v", err)
+		}
+	}
 	return s, nil
+}
+
+// corrupt — файл испорчен на уровне диска: пустой (обычный итог отключения
+// питания на XFS/ext4) или вовсе не JSON (нули, обрывок). Файл с правильным
+// JSON, который не подошёл по смыслу, повреждённым не считается.
+func corrupt(data []byte) bool {
+	return len(bytes.TrimSpace(data)) == 0 || !json.Valid(data)
+}
+
+// restoreBackup поднимает настройки из резервной копии, когда config.json испорчен.
+// Раньше программа в этом случае завершалась, systemd перезапускал её сотни
+// раз, и вся сеть оставалась без интернета, пока человек не вернул копию вручную.
+//
+// Берётся самая свежая из читаемых копий: .prev (сохраняется при каждом
+// запуске) обычно новее .bak (остаётся от миграции формата). Испорченный файл
+// не удаляется, а откладывается в config.json.broken-<время> — и только если
+// копия нашлась: иначе следующий запуск не нашёл бы config.json и молча начал
+// бы с настроек по умолчанию. Если годной копии нет, остаётся прежнее
+// поведение — ошибка запуска.
+func (s *Store) restoreBackup(data []byte, loadErr error) (*model.Config, error) {
+	log.Printf("ВНИМАНИЕ: %s повреждён (%d байт, %v) — возможно, было внезапное отключение питания; пробую резервные копии", s.path, len(data), loadErr)
+	type candidate struct {
+		path string
+		mod  time.Time
+		cfg  *model.Config
+	}
+	var best *candidate
+	for _, p := range []string{s.path + ".prev", s.path + ".bak"} {
+		fi, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			log.Printf("резервная копия %s не читается: %v", p, err)
+			continue
+		}
+		c := model.Defaults()
+		if _, err := load(b, c); err != nil {
+			log.Printf("резервная копия %s не подходит: %v", p, err)
+			continue
+		}
+		if best == nil || fi.ModTime().After(best.mod) {
+			best = &candidate{path: p, mod: fi.ModTime(), cfg: c}
+		}
+	}
+	if best == nil {
+		return nil, fmt.Errorf("%w; годной резервной копии (config.json.prev, config.json.bak) нет — восстановите настройки вручную", loadErr)
+	}
+	broken := fmt.Sprintf("%s.broken-%d", s.path, time.Now().Unix())
+	if err := os.Rename(s.path, broken); err != nil {
+		return nil, fmt.Errorf("%w; отложить повреждённый файл не удалось: %v", loadErr, err)
+	}
+	atomicfile.SyncDir(filepath.Dir(s.path))
+	if err := s.save(best.cfg); err != nil {
+		return nil, err
+	}
+	log.Printf("ВНИМАНИЕ: настройки восстановлены из %s от %s; повреждённый файл сохранён как %s",
+		filepath.Base(best.path), best.mod.Format("02.01.2006 15:04"), filepath.Base(broken))
+	s.recovered = fmt.Sprintf("Настройки были повреждены (внезапное отключение питания?) и восстановлены из резервной копии от %s; изменения после неё нужно повторить.",
+		best.mod.Format("02.01.2006 15:04"))
+	return best.cfg, nil
+}
+
+// Recovered — сообщение для интерфейса, если при запуске config.json был
+// повреждён и настройки подняты из резервной копии; иначе пустая строка.
+func (s *Store) Recovered() string {
+	return s.recovered
 }
 
 // load разбирает файл поверх значений по умолчанию (cfg): новые поля настроек
@@ -134,18 +225,18 @@ func (s *Store) commit(next *model.Config) error {
 	return nil
 }
 
-// save пишет во временный файл и переименовывает: при сбое питания
-// старый конфиг не повредится.
+// save пишет атомарно и со сбросом на диск: при сбое питания на месте
+// config.json останется прежняя или новая версия, но не пустой файл.
 func (s *Store) save(cfg *model.Config) error {
-	data, err := json.MarshalIndent(onDisk{Schema: model.SchemaVersion, Config: cfg}, "", "  ")
+	data, err := encode(cfg)
 	if err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
+	return atomicfile.Write(s.path, data, 0o600)
+}
+
+func encode(cfg *model.Config) ([]byte, error) {
+	return json.MarshalIndent(onDisk{Schema: model.SchemaVersion, Config: cfg}, "", "  ")
 }
 
 // clone — глубокая копия через JSON. Медленнее ручного копирования, но не

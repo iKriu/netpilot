@@ -71,6 +71,8 @@ type App struct {
 	fwErr string // последняя ошибка nftables
 	dnsFB bool   // включён запасной DNS (ядро не работает, см. dnsFallbackLocked)
 
+	tp tpState // запасной DNS и перезапуски проверкой живучести (transparent.go, health.go)
+
 	// dnsIdx — какой сервер из model.DirectDNSAuto сейчас прямой DNS (при
 	// «auto»). Атомарный: читается в env() под a.mu и меняется проверкой
 	// живучести без него (health.go).
@@ -160,6 +162,9 @@ func (a *App) startLocked() error {
 	if a.active != nil {
 		return errors.New("ядро уже запущено")
 	}
+	// Ядро не запустилось (в том числе при автозапуске) — DNS устройств
+	// должен кто-то обслуживать (см. ensureFallbackLocked).
+	defer a.ensureFallbackLocked()
 	cfg := a.Store.Get()
 	if transparent(cfg.Settings) && runtime.GOOS != "linux" {
 		err := errors.New("прозрачный режим работает только на Linux (OpenWrt, ZimaOS и другие); на этой системе выберите режим «Прокси-сервер»")
@@ -216,6 +221,7 @@ func (a *App) stopLocked() error {
 	err := a.active.Stop()
 	log.Printf("ядро %s остановлено", a.active.Name())
 	a.active, a.dirty, a.dirtyBySubs = nil, false, false
+	a.ensureFallbackLocked()
 	return err
 }
 
@@ -238,9 +244,11 @@ func (a *App) Apply() error {
 			return errors.New(a.lastErr)
 		}
 	}
+	a.tp.hold = true // ядро сейчас же запустится снова — запасной DNS не дёргаем
 	if err := a.stopLocked(); err != nil {
 		log.Printf("остановка ядра: %v", err)
 	}
+	a.tp.hold = false
 	return a.startLocked()
 }
 
@@ -295,6 +303,9 @@ type Status struct {
 	Error      string       `json:"error,omitempty"`
 	Proxy      string       `json:"proxy"`
 	LanIPs     []string     `json:"lanIps,omitempty"` // адреса NetPilot в локальной сети
+	// Warnings — предупреждения не о ядре (например, настройки восстановлены
+	// из резервной копии после сбоя питания): показываются на обзоре.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 func (a *App) Status() Status {
@@ -306,6 +317,9 @@ func (a *App) Status() Status {
 		Dirty: a.dirty, Error: a.lastErr, Restarting: a.restart.pending,
 		Proxy:  net.JoinHostPort(s.ListenAddr, strconv.Itoa(s.MixedPort)),
 		LanIPs: scan.LocalAddrs(),
+	}
+	if msg := a.Store.Recovered(); msg != "" {
+		st.Warnings = append(st.Warnings, msg)
 	}
 	if a.active != nil {
 		st.Running = true
