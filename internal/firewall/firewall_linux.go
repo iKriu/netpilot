@@ -22,6 +22,15 @@ func Check() Status {
 	if b, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward"); err == nil && strings.TrimSpace(string(b)) != "1" {
 		st.Problems = append(st.Problems, "пересылка пакетов выключена (net.ipv4.ip_forward=0): устройства не смогут выходить в интернет через этот шлюз")
 	}
+	routes, ok := DefaultRoutes()
+	resolv, _ := os.ReadFile("/run/systemd/resolve/resolv.conf")
+	if len(resolv) == 0 {
+		resolv, _ = os.ReadFile("/etc/resolv.conf")
+	}
+	critical, warnings := uplinkProblems(routes, ok, localPrefixes(), string(resolv))
+	st.Critical = critical
+	st.Problems = append(st.Problems, critical...)
+	st.Problems = append(st.Problems, warnings...)
 	if st.Supported {
 		st.Active = exec.Command("nft", "list", "table", "ip", Table).Run() == nil
 	}
@@ -99,14 +108,15 @@ func DNSFallback(upstream string) error {
 
 // SystemDNS — DNS-сервер, которым пользуется сама система (роутер или
 // провайдер): у systemd-resolved настоящие серверы — в /run/systemd/resolve,
-// в /etc/resolv.conf там заглушка 127.0.0.53. "" — не найден.
+// в /etc/resolv.conf там заглушка 127.0.0.53. Адреса самого сервера не
+// подходят (см. firstNameserver). "" — не найден.
 func SystemDNS() string {
 	for _, f := range []string{"/run/systemd/resolve/resolv.conf", "/etc/resolv.conf"} {
 		b, err := os.ReadFile(f)
 		if err != nil {
 			continue
 		}
-		if ip := firstNameserver(string(b)); ip != "" {
+		if ip := firstNameserver(string(b), IsLocalAddr); ip != "" {
 			return ip
 		}
 	}
