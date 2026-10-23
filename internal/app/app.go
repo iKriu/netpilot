@@ -295,6 +295,9 @@ type Status struct {
 	Error      string       `json:"error,omitempty"`
 	Proxy      string       `json:"proxy"`
 	LanIPs     []string     `json:"lanIps,omitempty"` // адреса NetPilot в локальной сети
+	// Warnings — предупреждения не о ядре (например, настройки восстановлены
+	// из резервной копии после сбоя питания): показываются на обзоре.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 func (a *App) Status() Status {
@@ -306,6 +309,9 @@ func (a *App) Status() Status {
 		Dirty: a.dirty, Error: a.lastErr, Restarting: a.restart.pending,
 		Proxy:  net.JoinHostPort(s.ListenAddr, strconv.Itoa(s.MixedPort)),
 		LanIPs: scan.LocalAddrs(),
+	}
+	if msg := a.Store.Recovered(); msg != "" {
+		st.Warnings = append(st.Warnings, msg)
 	}
 	if a.active != nil {
 		st.Running = true

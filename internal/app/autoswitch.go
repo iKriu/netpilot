@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"netpilot/internal/atomicfile"
 	"netpilot/internal/core"
 	"netpilot/internal/model"
 )
@@ -348,7 +349,7 @@ func (a *App) selectNode(ctx context.Context, api core.Clash, g autoGroupInfo, i
 		// Пишем под блокировкой: группы проверяются одновременно, и снимок,
 		// записанный позже, не должен затереть более свежий выбор другой группы.
 		data, _ := json.Marshal(st.selected)
-		_ = os.WriteFile(filepath.Join(a.DataDir, "auto.json"), data, 0o600)
+		_ = atomicfile.Write(filepath.Join(a.DataDir, "auto.json"), data, 0o600)
 	}
 	st.mu.Unlock()
 
@@ -408,7 +409,7 @@ func (a *App) storeSelection(tag, id string) {
 	st.selected[tag] = id
 	st.history[tag] = nil
 	data, _ := json.Marshal(st.selected)
-	_ = os.WriteFile(filepath.Join(a.DataDir, "auto.json"), data, 0o600)
+	_ = atomicfile.Write(filepath.Join(a.DataDir, "auto.json"), data, 0o600)
 }
 
 func (a *App) AutoStatus() ([]AutoView, map[string]Latency) {

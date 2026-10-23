@@ -121,6 +121,7 @@ export async function pageOverview() {
   const alerts = [];
   if (s.error) alerts.push(notice('bad', 'alert', s.error));
   arr(s.issues).forEach(i => alerts.push(notice('', 'alert', i.message)));
+  arr(s.warnings).forEach(w => alerts.push(notice('', 'alert', w)));
   if (!arr(nodes).length) alerts.push(notice('info', 'info', 'Серверы не добавлены: весь трафик идёт напрямую.', h('a', { class: 'btn sm', href: '#/nodes' }, 'Добавить серверы')));
   arr(net && net.warnings).forEach(w => alerts.push(notice('', 'alert', w)));
 

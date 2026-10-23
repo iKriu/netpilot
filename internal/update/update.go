@@ -30,6 +30,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"netpilot/internal/atomicfile"
 )
 
 // DefaultRepo — репозиторий с релизами по умолчанию (владелец/имя).
@@ -149,10 +151,7 @@ func (u *Updater) file(name string) string { return filepath.Join(u.dir, name) }
 
 func (u *Updater) save() {
 	b, _ := json.MarshalIndent(u.p, "", "  ")
-	tmp := u.file("state.json.tmp")
-	if os.WriteFile(tmp, b, 0o600) == nil {
-		_ = os.Rename(tmp, u.file("state.json"))
-	}
+	_ = atomicfile.Write(u.file("state.json"), b, 0o600)
 }
 
 func (u *Updater) repo() string {
@@ -769,9 +768,12 @@ func at(p []int, i int) int {
 
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
 
+// writeJSON пишет атомарно и со сбросом на диск: pending.json читается после
+// перезапуска (часто — после перезагрузки), и пустой файл вместо него сорвал бы
+// проверку нового бинарника и откат.
 func writeJSON(path string, v any) {
 	b, _ := json.Marshal(v)
-	_ = os.WriteFile(path, b, 0o600)
+	_ = atomicfile.Write(path, b, 0o600)
 }
 
 func copyFile(src, dst string, mode os.FileMode) error {
@@ -798,7 +800,13 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	if runtime.GOOS == "windows" {
 		os.Remove(dst)
 	}
-	return os.Rename(tmp, dst)
+	if err := os.Rename(tmp, dst); err != nil {
+		return err
+	}
+	// Данные уже сброшены (out.Sync), но само новое имя тоже должно
+	// пережить сбой питания: иначе после перезагрузки копии для отката нет.
+	atomicfile.SyncDir(filepath.Dir(dst))
+	return nil
 }
 
 // counter считает записанные байты и сообщает о них не чаще раза в 64 КБ.
