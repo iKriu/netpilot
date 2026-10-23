@@ -3,6 +3,7 @@
 package auth
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -10,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +19,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"netpilot/internal/atomicfile"
 )
 
 const (
@@ -93,12 +97,70 @@ func Open(dataDir string) (*Auth, error) {
 		return nil, err
 	}
 	if err := json.Unmarshal(data, &a.state); err != nil {
-		return nil, fmt.Errorf("auth.json: %w", err)
+		if !corrupt(data) {
+			return nil, fmt.Errorf("auth.json: %w", err)
+		}
+		// Испорченный auth.json НЕЛЬЗЯ считать «пароль не задан»: тогда первый,
+		// кто откроет панель после сбоя питания, задал бы свой пароль и получил
+		// управление шлюзом. Поэтому только восстановление из копии, а без неё —
+		// отказ запуска (лучше без панели, чем с чужой).
+		if err := a.restorePrev(data, err); err != nil {
+			return nil, err
+		}
 	}
 	if a.state.Sessions == nil {
 		a.state.Sessions = map[string]int64{}
 	}
+	// Копия на случай, если auth.json испортится при следующем отключении
+	// питания. Раз за запуск, а не при каждом входе: меньше износ флеш-памяти;
+	// при восстановлении теряются только сессии новее копии (и пароль, если
+	// его сменили после запуска).
+	if a.state.Hash != "" {
+		if b, err := json.MarshalIndent(a.state, "", "  "); err == nil {
+			if err := atomicfile.Write(a.path+".prev", b, 0o600); err != nil {
+				log.Printf("не удалось сохранить резервную копию настроек входа: %v", err)
+			}
+		}
+	}
 	return a, nil
+}
+
+// corrupt — файл испорчен на уровне диска: пустой или вовсе не JSON.
+func corrupt(data []byte) bool {
+	return len(bytes.TrimSpace(data)) == 0 || !json.Valid(data)
+}
+
+// restorePrev поднимает состояние из auth.json.prev. Испорченный файл
+// откладывается в auth.json.broken-<время> — только после удачного
+// восстановления, иначе следующий запуск не нашёл бы auth.json и открыл бы
+// первую настройку пароля кому угодно.
+func (a *Auth) restorePrev(data []byte, loadErr error) error {
+	log.Printf("ВНИМАНИЕ: %s повреждён (%d байт, %v) — возможно, было внезапное отключение питания; пробую резервную копию", a.path, len(data), loadErr)
+	fail := func(why string) error {
+		return fmt.Errorf("auth.json повреждён (%v), а %s; восстановите файл вручную или удалите его, чтобы задать пароль заново", loadErr, why)
+	}
+	b, err := os.ReadFile(a.path + ".prev")
+	if err != nil {
+		return fail("резервной копии auth.json.prev нет")
+	}
+	var st fileState
+	if err := json.Unmarshal(b, &st); err != nil || st.Hash == "" {
+		return fail("резервная копия auth.json.prev негодна")
+	}
+	broken := fmt.Sprintf("%s.broken-%d", a.path, time.Now().Unix())
+	if err := os.Rename(a.path, broken); err != nil {
+		return fail("отложить его не удалось: " + err.Error())
+	}
+	atomicfile.SyncDir(filepath.Dir(a.path))
+	a.state = st
+	if a.state.Sessions == nil {
+		a.state.Sessions = map[string]int64{}
+	}
+	if err := a.saveLocked(); err != nil {
+		return err
+	}
+	log.Printf("ВНИМАНИЕ: настройки входа восстановлены из auth.json.prev; повреждённый файл сохранён как %s", filepath.Base(broken))
+	return nil
 }
 
 // Configured — задан ли пароль.
@@ -388,11 +450,9 @@ func (a *Auth) newSessionLocked() (string, error) {
 
 func (a *Auth) saveLocked() error {
 	data, _ := json.MarshalIndent(a.state, "", "  ")
-	tmp := a.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, a.path)
+	// Со сбросом на диск: пустой auth.json после сбоя питания означал бы
+	// отказ запуска (или, без копии, ручное восстановление).
+	return atomicfile.Write(a.path, data, 0o600)
 }
 
 func hashToken(t string) string {

@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"netpilot/internal/atomicfile"
 )
 
 type List struct {
@@ -138,10 +140,8 @@ func mihomoText(kind string, data []byte) string {
 	return b.String()
 }
 
+// writeAtomic — со сбросом на диск: пустой файл списка после сбоя питания
+// ядро может не принять, и после перезагрузки оно не запустилось бы.
 func writeAtomic(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return atomicfile.Write(path, data, 0o644)
 }

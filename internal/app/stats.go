@@ -7,6 +7,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"netpilot/internal/atomicfile"
 )
 
 // Статистика трафика по дням: всего, через прокси и напрямую, по устройствам.
@@ -119,10 +121,7 @@ func (a *App) saveStats(force bool) {
 	data, _ := json.Marshal(s.days)
 	s.dirty, s.saved = false, time.Now()
 	s.mu.Unlock()
-	tmp := a.statsPath() + ".tmp"
-	if os.WriteFile(tmp, data, 0o600) == nil {
-		_ = os.Rename(tmp, a.statsPath())
-	}
+	_ = atomicfile.Write(a.statsPath(), data, 0o600)
 }
 
 type StatsView struct {
